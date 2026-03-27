@@ -158,7 +158,7 @@ int main(int argc, char *argv[]) {
             .arg(frame_count)
             .arg(accumulated_map->size()));
 
-        viewer.update();
+        viewer.refreshView();
     });
     update_timer.start(33);
 
