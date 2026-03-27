@@ -21,6 +21,8 @@
   "icp": {
     "odom_strategy": 0,
     "filtering_strategy": 1,
+    "kalman_process_noise": 0.001,
+    "kalman_measurement_noise": 0.01,
     "point_to_plane": true,
     "voxel_size": 0.03,
     "max_correspondence_distance": 0.25,

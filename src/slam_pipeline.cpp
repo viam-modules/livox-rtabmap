@@ -39,6 +39,10 @@ bool SlamPipeline::init(const json &config) {
     params.insert({rtabmap::Parameters::kOdomFilteringStrategy(),
         std::to_string(icp.value("filtering_strategy", 1))});
     params.insert({rtabmap::Parameters::kOdomGuessMotion(), "true"});
+    params.insert({rtabmap::Parameters::kOdomKalmanProcessNoise(),
+        std::to_string(icp.value("kalman_process_noise", 0.001))});
+    params.insert({rtabmap::Parameters::kOdomKalmanMeasurementNoise(),
+        std::to_string(icp.value("kalman_measurement_noise", 0.01))});
 
     // ICP parameters from config
     params.insert({rtabmap::Parameters::kIcpPointToPlane(),
