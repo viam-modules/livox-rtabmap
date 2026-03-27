@@ -84,6 +84,8 @@ int main(int argc, char *argv[]) {
 
     auto map_color_arr = config.value("map_color", std::vector<int>{180, 180, 180});
     auto scan_color_arr = config.value("scan_color", std::vector<int>{0, 255, 0});
+    int map_point_size = config.value("map_point_size", 1);
+    int scan_point_size = config.value("scan_point_size", 3);
     QColor map_color(map_color_arr[0], map_color_arr[1], map_color_arr[2]);
     QColor scan_color(scan_color_arr[0], scan_color_arr[1], scan_color_arr[2]);
 
@@ -184,6 +186,8 @@ int main(int argc, char *argv[]) {
             auto sc = new_config.value("scan_color", std::vector<int>{scan_color.red(), scan_color.green(), scan_color.blue()});
             map_color = QColor(mc[0], mc[1], mc[2]);
             scan_color = QColor(sc[0], sc[1], sc[2]);
+            map_point_size = new_config.value("map_point_size", map_point_size);
+            scan_point_size = new_config.value("scan_point_size", scan_point_size);
             std::cout << "[CONFIG] Reloaded " << config_path << "\n";
         } catch (const std::exception &e) {
             std::cerr << "[CONFIG] Reload error: " << e.what() << "\n";
@@ -290,6 +294,7 @@ int main(int argc, char *argv[]) {
         }
 
         viewer.addCloud("map", display_cloud);
+        viewer.setCloudPointSize("map", map_point_size);
 
         // Current scan in scan_color
         auto scan_rgb = pcl::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
@@ -302,6 +307,7 @@ int main(int argc, char *argv[]) {
         }
         scan_rgb->width = scan_rgb->size(); scan_rgb->height = 1;
         viewer.addCloud("scan", scan_rgb, latest_pose);
+        viewer.setCloudPointSize("scan", scan_point_size);
 
         // Draw trajectory
         if (show_trajectory && trajectory_xz.size() > 1) {

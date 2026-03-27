@@ -62,6 +62,8 @@ All parameters are in `config/default.json`. Edit and restart — no recompile n
 | `color_mode` | string | `"intensity"` | How to color map points. `"intensity"`: grayscale from reflectivity. `"flat"`: solid color from `map_color`. `"age"`: blue (old) → red (new) to visualize convergence. `"height"`: blue (low) → red (high) rainbow by Z coordinate |
 | `map_color` | [R,G,B] | `[180, 180, 180]` | RGB color for accumulated map points when `color_mode` is `"flat"` (0-255 per channel) |
 | `scan_color` | [R,G,B] | `[0, 255, 0]` | RGB color for the current scan overlay (0-255 per channel) |
+| `map_point_size` | int | `1` | Pixel size of accumulated map points in the viewer |
+| `scan_point_size` | int | `3` | Pixel size of current scan points in the viewer. Larger than map points makes the latest scan easy to distinguish |
 | `show_trajectory` | bool | `true` | Show the odometry trajectory as yellow points projected onto the ground plane. Useful for spotting drift — a straight walk should show a straight line |
 
 ### ICP Odometry (`icp` section)

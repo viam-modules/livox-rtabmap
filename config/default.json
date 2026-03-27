@@ -11,6 +11,8 @@
   "color_mode": "intensity",
   "map_color": [180, 180, 180],
   "scan_color": [0, 255, 0],
+  "map_point_size": 1,
+  "scan_point_size": 3,
   "camera_distance": 10.0,
   "show_trajectory": true,
   "icp": {
