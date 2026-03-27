@@ -98,6 +98,10 @@ int main(int argc, char *argv[]) {
     viewer.setBackgroundColor(QColor(20, 20, 20));
     viewer.setGridShown(true);
     viewer.resize(1280, 720);
+    float cam_dist = config.value("camera_distance", 10.0f);
+    viewer.setCameraPosition(0, 0, cam_dist,  // camera position
+                             0, 0, 0,          // focal point (origin)
+                             0, 1, 0);         // up vector (Y up... VTK default but let's be explicit)
     viewer.show();
 
     std::mutex cloud_mu;
