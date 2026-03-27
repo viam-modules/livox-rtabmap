@@ -225,72 +225,7 @@ int main(int argc, char *argv[]) {
         float tx = latest_pose.x(), ty = latest_pose.y(), tz = latest_pose.z();
         trajectory_xz.push_back({tx, ty});
 
-        // Build colored cloud for display
-        auto display_cloud = pcl::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
-        display_cloud->reserve(map_points.size());
-
-        if (color_mode == "age") {
-            // Blue (old) → Red (new)
-            for (const auto &mp : map_points) {
-                float age = (max_frame_id > 1) ? (float)mp.frame_id / max_frame_id : 1.0f;
-                float hue = (1.0f - age) * 240.0f;
-                uint8_t r, g, b;
-                hsv2rgb(hue, 1.0f, 1.0f, r, g, b);
-                pcl::PointXYZRGB rp;
-                rp.x = mp.x; rp.y = mp.y; rp.z = mp.z;
-                rp.r = r; rp.g = g; rp.b = b;
-                display_cloud->push_back(rp);
-            }
-        } else if (color_mode == "height") {
-            // Find Z range then map to rainbow
-            float zmin = 1e9, zmax = -1e9;
-            for (const auto &mp : map_points) {
-                if (mp.z < zmin) zmin = mp.z;
-                if (mp.z > zmax) zmax = mp.z;
-            }
-            float zrange = zmax - zmin;
-            if (zrange < 0.01f) zrange = 1.0f;
-            for (const auto &mp : map_points) {
-                float t = (mp.z - zmin) / zrange; // 0 = low, 1 = high
-                float hue = (1.0f - t) * 240.0f;  // blue (low) → red (high)
-                uint8_t r, g, b;
-                hsv2rgb(hue, 1.0f, 1.0f, r, g, b);
-                pcl::PointXYZRGB rp;
-                rp.x = mp.x; rp.y = mp.y; rp.z = mp.z;
-                rp.r = r; rp.g = g; rp.b = b;
-                display_cloud->push_back(rp);
-            }
-        } else if (color_mode == "flat") {
-            for (const auto &mp : map_points) {
-                pcl::PointXYZRGB rp;
-                rp.x = mp.x; rp.y = mp.y; rp.z = mp.z;
-                rp.r = map_color.red(); rp.g = map_color.green(); rp.b = map_color.blue();
-                display_cloud->push_back(rp);
-            }
-        } else {
-            // Intensity mode — normalize to full range then map to rainbow
-            float imin = 1e9, imax = -1e9;
-            for (const auto &mp : map_points) {
-                if (mp.intensity < imin) imin = mp.intensity;
-                if (mp.intensity > imax) imax = mp.intensity;
-            }
-            float irange = imax - imin;
-            if (irange < 1.0f) irange = 1.0f;
-            for (const auto &mp : map_points) {
-                float t = (mp.intensity - imin) / irange; // 0 = low, 1 = high
-                float hue = (1.0f - t) * 240.0f; // blue (low) → red (high)
-                uint8_t r, g, b;
-                hsv2rgb(hue, 1.0f, 1.0f, r, g, b);
-                pcl::PointXYZRGB rp;
-                rp.x = mp.x; rp.y = mp.y; rp.z = mp.z;
-                rp.r = r; rp.g = g; rp.b = b;
-                display_cloud->push_back(rp);
-            }
-        }
-        display_cloud->width = display_cloud->size();
-        display_cloud->height = 1;
-
-        // Voxel downsample periodically — filter map_points via PointXYZI to preserve intensity
+        // Voxel downsample periodically — before building display cloud
         if (frame_count % downsample_interval == 0 && map_points.size() > 100000) {
             auto xyzi = pcl::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
             xyzi->reserve(map_points.size());
@@ -313,29 +248,45 @@ int main(int argc, char *argv[]) {
             for (const auto &p : *filtered) {
                 map_points.push_back({p.x, p.y, p.z, p.intensity, frame_count});
             }
-
-            // Rebuild display cloud from filtered map_points
-            display_cloud->clear();
-            display_cloud->reserve(map_points.size());
-            for (const auto &mp : map_points) {
-                pcl::PointXYZRGB rp;
-                rp.x = mp.x; rp.y = mp.y; rp.z = mp.z;
-                if (color_mode == "age") {
-                    float age = (max_frame_id > 1) ? (float)mp.frame_id / max_frame_id : 1.0f;
-                    hsv2rgb((1.0f - age) * 240.0f, 1.0f, 1.0f, rp.r, rp.g, rp.b);
-                } else if (color_mode == "height") {
-                    // will be slightly off since we lost zmin/zmax, but acceptable
-                    rp.r = rp.g = rp.b = std::min(255, std::max(0, (int)mp.intensity));
-                } else if (color_mode == "flat") {
-                    rp.r = map_color.red(); rp.g = map_color.green(); rp.b = map_color.blue();
-                } else {
-                    uint8_t v = std::min(255, std::max(0, (int)mp.intensity));
-                    rp.r = v; rp.g = v; rp.b = v;
-                }
-                display_cloud->push_back(rp);
-            }
-            display_cloud->width = display_cloud->size(); display_cloud->height = 1;
         }
+
+        // Build colored cloud for display (single code path, always from map_points)
+        auto display_cloud = pcl::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
+        display_cloud->reserve(map_points.size());
+
+        // Pre-compute ranges for normalized colormaps
+        float zmin = 1e9, zmax = -1e9, imin = 1e9, imax = -1e9;
+        if (color_mode == "height" || color_mode == "intensity") {
+            for (const auto &mp : map_points) {
+                if (mp.z < zmin) zmin = mp.z;
+                if (mp.z > zmax) zmax = mp.z;
+                if (mp.intensity < imin) imin = mp.intensity;
+                if (mp.intensity > imax) imax = mp.intensity;
+            }
+        }
+        float zrange = (zmax - zmin < 0.01f) ? 1.0f : zmax - zmin;
+        float irange = (imax - imin < 1.0f) ? 1.0f : imax - imin;
+
+        for (const auto &mp : map_points) {
+            pcl::PointXYZRGB rp;
+            rp.x = mp.x; rp.y = mp.y; rp.z = mp.z;
+
+            if (color_mode == "age") {
+                float age = (max_frame_id > 1) ? (float)mp.frame_id / max_frame_id : 1.0f;
+                hsv2rgb((1.0f - age) * 240.0f, 1.0f, 1.0f, rp.r, rp.g, rp.b);
+            } else if (color_mode == "height") {
+                float t = (mp.z - zmin) / zrange;
+                hsv2rgb((1.0f - t) * 240.0f, 1.0f, 1.0f, rp.r, rp.g, rp.b);
+            } else if (color_mode == "flat") {
+                rp.r = map_color.red(); rp.g = map_color.green(); rp.b = map_color.blue();
+            } else {
+                float t = (mp.intensity - imin) / irange;
+                hsv2rgb((1.0f - t) * 240.0f, 1.0f, 1.0f, rp.r, rp.g, rp.b);
+            }
+            display_cloud->push_back(rp);
+        }
+        display_cloud->width = display_cloud->size();
+        display_cloud->height = 1;
 
         viewer.addCloud("map", display_cloud);
         viewer.setCloudPointSize("map", map_point_size);

@@ -12,7 +12,7 @@
   "map_add_interval": 1,
   "map_voxel_size": 0.1,
   "map_downsample_interval": 20,
-  "color_mode": "intensity",
+  "color_mode": "height",
   "map_color": [180, 180, 180],
   "scan_color": [0, 255, 0],
   "map_point_size": 1,
