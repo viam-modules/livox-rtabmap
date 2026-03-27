@@ -9,6 +9,7 @@ set(CMAKE_AUTOMOC ON)
 find_package(RTABMap REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common io filters)
 find_package(Qt5 REQUIRED COMPONENTS Widgets)
+find_package(nlohmann_json REQUIRED)
 
 # Build Livox-SDK2 static library
 # Patch: disable -Werror and add -include cstdint for GCC 13+
@@ -36,6 +37,7 @@ target_link_libraries(livox_rtabmap PRIVATE
     rtabmap::utilite
     ${PCL_LIBRARIES}
     Qt5::Widgets
+    nlohmann_json::nlohmann_json
     pthread
 )
 

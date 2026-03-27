@@ -1,6 +1,7 @@
 #include <atomic>
 #include <csignal>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <mutex>
 #include <string>
@@ -16,8 +17,12 @@
 #include <rtabmap/gui/CloudViewer.h>
 #include <rtabmap/core/Transform.h>
 
+#include <nlohmann/json.hpp>
+
 #include "livox_receiver.h"
 #include "slam_pipeline.h"
+
+using json = nlohmann::json;
 
 static std::atomic<bool> running{true};
 
@@ -25,43 +30,43 @@ static void signalHandler(int) {
     running = false;
 }
 
-static void printUsage(const char *prog) {
-    std::cerr << "Usage: " << prog << " --sensor-ip <ip> --host-ip <ip> [--headless]\n";
-}
-
 int main(int argc, char *argv[]) {
-    std::string sensor_ip = "192.168.1.196";
-    std::string host_ip = "192.168.1.10";
-    bool headless = false;
-
-    // Parse args before QApplication consumes them
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--sensor-ip") == 0 && i + 1 < argc) {
-            sensor_ip = argv[++i];
-        } else if (strcmp(argv[i], "--host-ip") == 0 && i + 1 < argc) {
-            host_ip = argv[++i];
-        } else if (strcmp(argv[i], "--headless") == 0) {
-            headless = true;
-        }
-    }
-
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
 
+    // Load config file (first arg, or default path)
+    std::string config_path = "config/default.json";
+    if (argc > 1 && argv[1][0] != '-') {
+        config_path = argv[1];
+    }
+
+    std::ifstream f(config_path);
+    if (!f) {
+        std::cerr << "Cannot open config: " << config_path << "\n";
+        return 1;
+    }
+    json config = json::parse(f);
+
+    std::string sensor_ip = config.value("sensor_ip", "192.168.1.196");
+    std::string host_ip = config.value("host_ip", "192.168.1.10");
+    bool headless = config.value("headless", false);
+    float map_voxel = config.value("map_voxel_size", 0.03f);
+    int downsample_interval = config.value("map_downsample_interval", 50);
+
     std::cout << "Livox → RTAB-Map SLAM\n"
+              << "  Config: " << config_path << "\n"
               << "  Sensor: " << sensor_ip << "\n"
               << "  Host:   " << host_ip << "\n"
               << "  Mode:   " << (headless ? "headless" : "GUI") << "\n\n";
 
     // Init SLAM pipeline
     SlamPipeline slam;
-    if (!slam.init()) {
+    if (!slam.init(config)) {
         std::cerr << "Failed to init SLAM pipeline\n";
         return 1;
     }
 
     if (headless) {
-        // Headless mode — no Qt, just process and print
         LivoxReceiver receiver(sensor_ip, host_ip);
         bool ok = receiver.start(
             [&slam](pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t ts) {
@@ -79,7 +84,7 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
-    // GUI mode — Qt runs on main thread, Livox SDK on background thread
+    // GUI mode
     QApplication app(argc, argv);
 
     rtabmap::CloudViewer viewer;
@@ -89,14 +94,12 @@ int main(int argc, char *argv[]) {
     viewer.resize(1280, 720);
     viewer.show();
 
-    // Shared state between SDK callback thread and Qt main thread
     std::mutex cloud_mu;
     pcl::PointCloud<pcl::PointXYZI>::Ptr latest_cloud;
     rtabmap::Transform latest_pose;
     pcl::PointCloud<pcl::PointXYZI>::Ptr accumulated_map(new pcl::PointCloud<pcl::PointXYZI>);
     int frame_count = 0;
 
-    // Start Livox receiver — callback runs on SDK thread
     LivoxReceiver receiver(sensor_ip, host_ip);
     bool ok = receiver.start(
         [&](pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t ts) {
@@ -114,7 +117,6 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Timer to update the viewer from the main thread (30Hz)
     QTimer update_timer;
     QObject::connect(&update_timer, &QTimer::timeout, [&]() {
         if (!running) {
@@ -125,11 +127,9 @@ int main(int argc, char *argv[]) {
         std::lock_guard<std::mutex> lock(cloud_mu);
         if (!latest_cloud) return;
 
-        // Transform current cloud by pose and add to accumulated map
         for (const auto &p : *latest_cloud) {
             pcl::PointXYZI tp;
             float x = p.x, y = p.y, z = p.z;
-            // Apply pose transform
             const float *data = latest_pose.data();
             tp.x = data[0]*x + data[1]*y + data[2]*z + data[3];
             tp.y = data[4]*x + data[5]*y + data[6]*z + data[7];
@@ -141,29 +141,24 @@ int main(int argc, char *argv[]) {
         accumulated_map->width = accumulated_map->size();
         accumulated_map->height = 1;
 
-        // Downsample map every 50 frames to keep it manageable
-        if (frame_count % 50 == 0 && accumulated_map->size() > 100000) {
+        if (frame_count % downsample_interval == 0 && accumulated_map->size() > 100000) {
             pcl::VoxelGrid<pcl::PointXYZI> voxel;
             voxel.setInputCloud(accumulated_map);
-            voxel.setLeafSize(0.03f, 0.03f, 0.03f); // 30mm voxel
+            voxel.setLeafSize(map_voxel, map_voxel, map_voxel);
             pcl::PointCloud<pcl::PointXYZI>::Ptr filtered(new pcl::PointCloud<pcl::PointXYZI>);
             voxel.filter(*filtered);
             accumulated_map = filtered;
         }
 
-        // Update viewer with accumulated map
         viewer.addCloud("map", accumulated_map, rtabmap::Transform::getIdentity(), QColor(180, 180, 180));
-
-        // Show current scan in a different color
         viewer.addCloud("scan", latest_cloud, latest_pose, QColor(0, 255, 0));
-
         latest_cloud.reset();
 
         viewer.setWindowTitle(QString("Livox SLAM | Frame %1 | Map: %2 pts")
             .arg(frame_count)
             .arg(accumulated_map->size()));
     });
-    update_timer.start(33); // ~30Hz
+    update_timer.start(33);
 
     int ret = app.exec();
 

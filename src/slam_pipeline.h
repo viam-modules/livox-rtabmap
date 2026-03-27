@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <string>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -9,12 +10,14 @@
 #include <rtabmap/core/Odometry.h>
 #include <rtabmap/core/SensorData.h>
 
+#include <nlohmann/json.hpp>
+
 class SlamPipeline {
 public:
     SlamPipeline();
     ~SlamPipeline();
 
-    bool init();
+    bool init(const nlohmann::json &config);
 
     // Process a new lidar frame. Returns true if odometry succeeded.
     bool processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t timestamp_ns);

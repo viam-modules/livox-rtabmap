@@ -1,0 +1,22 @@
+{
+  "sensor_ip": "192.168.1.196",
+  "host_ip": "192.168.1.10",
+  "headless": false,
+  "map_voxel_size": 0.03,
+  "map_downsample_interval": 50,
+  "icp": {
+    "point_to_plane": true,
+    "voxel_size": 0.03,
+    "max_correspondence_distance": 0.25,
+    "iterations": 40,
+    "epsilon": 0.0005,
+    "max_translation": 0.5,
+    "max_rotation": 0.3
+  },
+  "rtabmap": {
+    "detection_rate": 0,
+    "proximity_by_space": true,
+    "linear_update": 0.1,
+    "angular_update": 0.1
+  }
+}
