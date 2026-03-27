@@ -31,6 +31,14 @@ mkdir build && cd build && cmake .. && make -j$(nproc)
 
 The viewer shows the accumulated map in real time. Mouse to rotate/zoom/pan. Close the window or Ctrl+C to stop. The SLAM database is saved automatically on exit.
 
+For SSH X forwarding, you need XQuartz on macOS and software rendering:
+```bash
+ssh -Y host
+LIBGL_ALWAYS_SOFTWARE=1 ./build/livox_rtabmap
+```
+
+All parameters in the **Map Display** section are live-reloadable — edit the config JSON while the app is running and changes take effect within 2 seconds. ICP and RTAB-Map parameters require a restart.
+
 ## Configuration
 
 All parameters are in `config/default.json`. Edit and restart — no recompile needed.
@@ -60,15 +68,15 @@ All parameters are in `config/default.json`. Edit and restart — no recompile n
 | `max_accel` | float | `0` | Maximum acceleration deviation from gravity in m/s². If the IMU reads acceleration above this threshold, the entire scan is rejected. 0 = no limit. Prevents adding blurry scans during fast motion or impacts |
 | `accel_holdoff` | float | `1.0` | Seconds to continue rejecting scans after acceleration drops below `max_accel`. Allows the sensor to stabilize before resuming mapping. Only active when `max_accel` > 0 |
 | `map_add_interval` | int | `1` | Only add every Nth frame to the accumulated map. 1 = every frame, 5 = every 5th frame. Reduces map density growth. Odometry still runs on every frame. Live-reloadable |
-| `map_voxel_size` | float | `0.03` | Voxel grid filter size in meters for the accumulated map. Each cube of this side length keeps one point (at the centroid). Smaller = denser map, more memory. Larger = sparser, faster |
-| `map_downsample_interval` | int | `50` | Number of frames between voxel grid downsampling passes on the accumulated map. At 10Hz frame rate, 50 = every 5 seconds |
+| `map_voxel_size` | float | `0.03` | Voxel grid filter size in meters for the accumulated map. Each cube of this side length keeps one point (at the centroid). Smaller = denser map, more memory. Larger = sparser, faster. Live-reloadable |
+| `map_downsample_interval` | int | `50` | Number of frames between voxel grid downsampling passes on the accumulated map. At 10Hz frame rate, 50 = every 5 seconds. Live-reloadable |
 | `camera_distance` | float | `10.0` | Initial camera distance from origin in meters. Larger = more zoomed out. Adjust based on the size of the environment you're mapping |
-| `color_mode` | string | `"intensity"` | How to color map points. `"intensity"`: grayscale from reflectivity. `"flat"`: solid color from `map_color`. `"age"`: blue (old) → red (new) to visualize convergence. `"height"`: blue (low) → red (high) rainbow by Z coordinate |
-| `map_color` | [R,G,B] | `[180, 180, 180]` | RGB color for accumulated map points when `color_mode` is `"flat"` (0-255 per channel) |
-| `scan_color` | [R,G,B] | `[0, 255, 0]` | RGB color for the current scan overlay (0-255 per channel) |
-| `map_point_size` | int | `1` | Pixel size of accumulated map points in the viewer |
-| `scan_point_size` | int | `3` | Pixel size of current scan points in the viewer. Larger than map points makes the latest scan easy to distinguish |
-| `show_trajectory` | bool | `true` | Show the odometry trajectory as yellow points projected onto the ground plane. Useful for spotting drift — a straight walk should show a straight line |
+| `color_mode` | string | `"intensity"` | How to color map points. `"intensity"`: auto-normalized blue→red rainbow by reflectivity. `"flat"`: solid color from `map_color`. `"age"`: blue (old) → red (new) to visualize convergence. `"height"`: blue (low) → red (high) rainbow by Z coordinate. Live-reloadable |
+| `map_color` | [R,G,B] | `[180, 180, 180]` | RGB color for accumulated map points when `color_mode` is `"flat"` (0-255 per channel). Live-reloadable |
+| `scan_color` | [R,G,B] | `[0, 255, 0]` | RGB color for the current scan overlay (0-255 per channel). Live-reloadable |
+| `map_point_size` | int | `1` | Pixel size of accumulated map points in the viewer. Live-reloadable |
+| `scan_point_size` | int | `3` | Pixel size of current scan points in the viewer. Larger than map points makes the latest scan easy to distinguish. Live-reloadable |
+| `show_trajectory` | bool | `true` | Show the odometry trajectory as magenta points projected onto the ground plane. Useful for spotting drift — a straight walk should show a straight line. Live-reloadable |
 
 ### ICP Odometry (`icp` section)
 
