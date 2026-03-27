@@ -52,6 +52,12 @@ int main(int argc, char *argv[]) {
     bool headless = config.value("headless", false);
     float map_voxel = config.value("map_voxel_size", 0.03f);
     int downsample_interval = config.value("map_downsample_interval", 50);
+    std::string color_mode = config.value("color_mode", "intensity");
+
+    auto map_color_arr = config.value("map_color", std::vector<int>{180, 180, 180});
+    auto scan_color_arr = config.value("scan_color", std::vector<int>{0, 255, 0});
+    QColor map_color(map_color_arr[0], map_color_arr[1], map_color_arr[2]);
+    QColor scan_color(scan_color_arr[0], scan_color_arr[1], scan_color_arr[2]);
 
     std::cout << "Livox → RTAB-Map SLAM\n"
               << "  Config: " << config_path << "\n"
@@ -150,8 +156,34 @@ int main(int argc, char *argv[]) {
             accumulated_map = filtered;
         }
 
-        viewer.addCloud("map", accumulated_map, rtabmap::Transform::getIdentity(), QColor(180, 180, 180));
-        viewer.addCloud("scan", latest_cloud, latest_pose, QColor(0, 255, 0));
+        if (color_mode == "flat") {
+            // Convert to XYZRGB for flat coloring
+            auto map_rgb = pcl::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
+            map_rgb->reserve(accumulated_map->size());
+            for (const auto &p : *accumulated_map) {
+                pcl::PointXYZRGB rp;
+                rp.x = p.x; rp.y = p.y; rp.z = p.z;
+                rp.r = map_color.red(); rp.g = map_color.green(); rp.b = map_color.blue();
+                map_rgb->push_back(rp);
+            }
+            map_rgb->width = map_rgb->size(); map_rgb->height = 1;
+            viewer.addCloud("map", map_rgb);
+
+            auto scan_rgb = pcl::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
+            scan_rgb->reserve(latest_cloud->size());
+            for (const auto &p : *latest_cloud) {
+                pcl::PointXYZRGB rp;
+                rp.x = p.x; rp.y = p.y; rp.z = p.z;
+                rp.r = scan_color.red(); rp.g = scan_color.green(); rp.b = scan_color.blue();
+                scan_rgb->push_back(rp);
+            }
+            scan_rgb->width = scan_rgb->size(); scan_rgb->height = 1;
+            viewer.addCloud("scan", scan_rgb, latest_pose);
+        } else {
+            // Intensity coloring (default) — pass default QColor so viewer uses intensity handler
+            viewer.addCloud("map", accumulated_map);
+            viewer.addCloud("scan", latest_cloud, latest_pose);
+        }
         latest_cloud.reset();
 
         viewer.setWindowTitle(QString("Livox SLAM | Frame %1 | Map: %2 pts")
