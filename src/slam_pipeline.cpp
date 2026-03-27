@@ -61,10 +61,13 @@ bool SlamPipeline::init(const json &config) {
         return false;
     }
 
+    db_path_ = config.value("database_path", "livox_slam.db");
+
     rtabmap_ = std::make_unique<rtabmap::Rtabmap>();
-    rtabmap_->init(params);
+    rtabmap_->init(params, db_path_);
 
     std::cout << "[SLAM] Pipeline initialized\n"
+              << "  Database: " << db_path_ << "\n"
               << "  ICP: voxel=" << icp.value("voxel_size", 0.03)
               << " corr=" << icp.value("max_correspondence_distance", 0.25)
               << " iter=" << icp.value("iterations", 40) << "\n";

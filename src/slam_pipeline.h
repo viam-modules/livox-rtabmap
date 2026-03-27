@@ -18,6 +18,7 @@ public:
     ~SlamPipeline();
 
     bool init(const nlohmann::json &config);
+    std::string getDatabasePath() const { return db_path_; }
 
     // Process a new lidar frame. Returns true if odometry succeeded.
     bool processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t timestamp_ns);
@@ -33,4 +34,5 @@ private:
     std::unique_ptr<rtabmap::Rtabmap> rtabmap_;
     rtabmap::Transform current_pose_;
     int frame_count_ = 0;
+    std::string db_path_;
 };

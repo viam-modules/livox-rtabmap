@@ -168,7 +168,8 @@ int main(int argc, char *argv[]) {
     receiver.stop();
 
     std::cout << "\nFinal: " << slam.getFrameCount() << " frames, "
-              << accumulated_map->size() << " map points\n";
+              << accumulated_map->size() << " map points\n"
+              << "Database saved to: " << slam.getDatabasePath() << "\n";
 
     return ret;
 }
