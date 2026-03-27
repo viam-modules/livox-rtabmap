@@ -47,10 +47,22 @@ bool SlamPipeline::init(const json &config) {
     // ICP parameters from config
     params.insert({rtabmap::Parameters::kIcpPointToPlane(),
         icp.value("point_to_plane", true) ? "true" : "false"});
+    params.insert({rtabmap::Parameters::kIcpPointToPlaneK(),
+        std::to_string(icp.value("point_to_plane_k", 10))});
+    params.insert({rtabmap::Parameters::kIcpPointToPlaneRadius(),
+        std::to_string(icp.value("point_to_plane_radius", 0.0))});
+    params.insert({rtabmap::Parameters::kIcpPointToPlaneGroundNormalsUp(),
+        std::to_string(icp.value("point_to_plane_ground_normals_up", 0.8))});
+    params.insert({rtabmap::Parameters::kIcpPointToPlaneMinComplexity(),
+        std::to_string(icp.value("point_to_plane_min_complexity", 0.02))});
     params.insert({rtabmap::Parameters::kIcpVoxelSize(),
         std::to_string(icp.value("voxel_size", 0.03))});
     params.insert({rtabmap::Parameters::kIcpMaxCorrespondenceDistance(),
         std::to_string(icp.value("max_correspondence_distance", 0.25))});
+    params.insert({rtabmap::Parameters::kIcpCorrespondenceRatio(),
+        std::to_string(icp.value("correspondence_ratio", 0.3))});
+    params.insert({rtabmap::Parameters::kIcpReciprocalCorrespondences(),
+        icp.value("reciprocal_correspondences", true) ? "true" : "false"});
     params.insert({rtabmap::Parameters::kIcpIterations(),
         std::to_string(icp.value("iterations", 40))});
     params.insert({rtabmap::Parameters::kIcpEpsilon(),
@@ -59,6 +71,14 @@ bool SlamPipeline::init(const json &config) {
         std::to_string(icp.value("max_translation", 0.5))});
     params.insert({rtabmap::Parameters::kIcpMaxRotation(),
         std::to_string(icp.value("max_rotation", 0.3))});
+    params.insert({rtabmap::Parameters::kIcpOutlierRatio(),
+        std::to_string(icp.value("outlier_ratio", 0.85))});
+
+    // Frame-to-Map parameters
+    params.insert({rtabmap::Parameters::kOdomF2MScanMaxSize(),
+        std::to_string(icp.value("f2m_scan_max_size", 15000))});
+    params.insert({rtabmap::Parameters::kOdomF2MScanSubtractRadius(),
+        std::to_string(icp.value("f2m_scan_subtract_radius", 0.03))});
 
     // RTAB-Map parameters from config
     params.insert({rtabmap::Parameters::kRtabmapDetectionRate(),

@@ -80,12 +80,21 @@ These control how consecutive lidar scans are aligned to estimate frame-to-frame
 | `kalman_process_noise` | float | `0.001` | — | Kalman filter process noise covariance. Higher = trusts measurements more (less smoothing). Lower = smoother but more lag |
 | `kalman_measurement_noise` | float | `0.01` | — | Kalman filter measurement noise covariance. Higher = trusts predictions more (more smoothing). Lower = follows ICP output more closely |
 | `point_to_plane` | bool | `true` | — | Use point-to-plane ICP (more accurate for flat surfaces) vs point-to-point |
+| `point_to_plane_k` | int | `10` | — | Number of neighbors used to compute normals for point-to-plane. Higher = smoother normals but slower |
+| `point_to_plane_radius` | float | `0.0` | meters | Search radius for normal computation. 0 = use K neighbors only |
+| `point_to_plane_ground_normals_up` | float | `0.8` | — | Fix flipped normals on ground surfaces for ring-like 3D LiDARs like the Mid-360. 0 = disabled, 1 = only perfectly vertical normals. 0.8 is recommended |
+| `point_to_plane_min_complexity` | float | `0.02` | — | Minimum structural complexity (0-1) to use point-to-plane. Below this, falls back to point-to-point. Prevents bad alignment in featureless areas like long corridors |
 | `voxel_size` | float | `0.03` | meters | Downsample input scans to this voxel size before ICP alignment. Smaller = more precise but slower. 0.03 = 30mm |
 | `max_correspondence_distance` | float | `0.25` | meters | Maximum distance between two points to be considered a correspondence pair. Too large = wrong matches. Too small = not enough matches. 0.25 = 250mm |
+| `correspondence_ratio` | float | `0.3` | — | Minimum ratio of matched correspondences to total points to accept the transform. Higher = stricter, rejects bad alignments where most points didn't match. 0.3 = at least 30% of points must match |
+| `reciprocal_correspondences` | bool | `true` | — | Both points must agree they're each other's closest neighbor. Reduces false matches |
 | `iterations` | int | `40` | — | Maximum ICP optimization iterations per frame. More = better convergence, slower |
 | `epsilon` | float | `0.0005` | meters | Convergence threshold. ICP stops early if improvement is below this. 0.0005 = 0.5mm |
 | `max_translation` | float | `0.5` | meters | Reject odometry results with translation larger than this between consecutive frames. Prevents jumps from bad ICP convergence. 0.5 = 500mm |
 | `max_rotation` | float | `0.3` | radians | Reject odometry results with rotation larger than this between consecutive frames. 0.3 = ~17 degrees |
+| `outlier_ratio` | float | `0.85` | — | Ratio of points to keep after trimming outliers (0-1). 0.85 = discard the 15% worst matches before computing the alignment. Helps reject spurious correspondences |
+| `f2m_scan_max_size` | int | `15000` | — | Maximum points in the Frame-to-Map local reference map. Larger = more reference coverage for better matching but slower. Should be close to your scan size (~20k for Mid-360) |
+| `f2m_scan_subtract_radius` | float | `0.03` | meters | When adding a new scan to the local map, remove existing points within this radius to prevent density buildup. Should roughly match voxel_size |
 
 ### RTAB-Map (`rtabmap` section)
 

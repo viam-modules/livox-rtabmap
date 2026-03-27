@@ -24,12 +24,21 @@
     "kalman_process_noise": 0.001,
     "kalman_measurement_noise": 0.01,
     "point_to_plane": true,
+    "point_to_plane_k": 10,
+    "point_to_plane_radius": 0.0,
+    "point_to_plane_ground_normals_up": 0.8,
+    "point_to_plane_min_complexity": 0.02,
     "voxel_size": 0.03,
     "max_correspondence_distance": 0.25,
+    "correspondence_ratio": 0.3,
+    "reciprocal_correspondences": true,
     "iterations": 40,
     "epsilon": 0.0005,
     "max_translation": 0.5,
-    "max_rotation": 0.3
+    "max_rotation": 0.3,
+    "outlier_ratio": 0.85,
+    "f2m_scan_max_size": 15000,
+    "f2m_scan_subtract_radius": 0.03
   },
   "rtabmap": {
     "detection_rate": 0,
