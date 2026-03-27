@@ -1,6 +1,7 @@
 #include "slam_pipeline.h"
 
 #include <cmath>
+#include <iomanip>
 #include <iostream>
 
 #include <rtabmap/core/Parameters.h>
@@ -75,6 +76,7 @@ bool SlamPipeline::init(const json &config) {
     min_range_ = config.value("min_range", 0.0f);
     max_range_ = config.value("max_range", 0.0f);
     max_accel_ = config.value("max_accel", 0.0f);
+    accel_holdoff_ = config.value("accel_holdoff", 1.0f);
     db_path_ = config.value("database_path", "livox_slam.db");
 
     rtabmap_ = std::make_unique<rtabmap::Rtabmap>();
@@ -92,10 +94,20 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
                                 pcl::PointCloud<pcl::PointXYZI>::Ptr *filtered_cloud) {
     if (!odom_ || !rtabmap_) return false;
 
-    if (max_accel_ > 0 && current_accel_.load() > max_accel_) {
-        std::cerr << "[SLAM] Scan rejected: accel " << current_accel_.load()
-                  << " m/s² > max " << max_accel_ << "\n";
-        return false;
+    if (max_accel_ > 0) {
+        double scan_time = static_cast<double>(timestamp_ns) / 1e9;
+        double time_since_high = scan_time - last_high_accel_time_.load();
+        if (current_accel_.load() > max_accel_ || time_since_high < accel_holdoff_) {
+            if (current_accel_.load() > max_accel_) {
+                std::cerr << "[SLAM] Scan rejected: accel " << current_accel_.load()
+                          << " m/s² > max " << max_accel_ << "\n";
+            } else {
+                std::cerr << "[SLAM] Scan rejected: holdoff " << std::fixed
+                          << std::setprecision(1) << time_since_high << "s / "
+                          << accel_holdoff_ << "s\n";
+            }
+            return false;
+        }
     }
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr xyz(new pcl::PointCloud<pcl::PointXYZ>);
@@ -166,7 +178,14 @@ void SlamPipeline::processIMU(float gyro_x, float gyro_y, float gyro_z,
 
     // Store magnitude of acceleration minus gravity for scan rejection
     float accel_mag = std::sqrt(linAcc[0]*linAcc[0] + linAcc[1]*linAcc[1] + linAcc[2]*linAcc[2]);
-    current_accel_.store(std::abs(accel_mag - g)); // deviation from 1g
+    float accel_dev = std::abs(accel_mag - (float)g);
+    current_accel_.store(accel_dev);
+
+    // Record time of high acceleration for holdoff
+    if (max_accel_ > 0 && accel_dev > max_accel_) {
+        double stamp = static_cast<double>(timestamp_ns) / 1e9;
+        last_high_accel_time_.store(stamp);
+    }
 
     // Let rtabmap handle IMU orientation estimation internally
     last_imu_ = rtabmap::IMU(

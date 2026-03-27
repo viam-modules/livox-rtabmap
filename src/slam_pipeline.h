@@ -51,6 +51,8 @@ private:
     float min_range_ = 0;
     float max_range_ = 0;
     float max_accel_ = 0; // m/s², 0 = disabled
+    float accel_holdoff_ = 1.0; // seconds
     std::atomic<float> current_accel_{0};
+    std::atomic<double> last_high_accel_time_{0}; // timestamp of last high-accel IMU reading
     rtabmap::IMU last_imu_;
 };

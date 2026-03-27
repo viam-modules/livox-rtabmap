@@ -58,6 +58,7 @@ All parameters are in `config/default.json`. Edit and restart — no recompile n
 | `min_range` | float | `0` | Minimum point range in meters. Points closer than this are discarded before ICP. 0 = no limit. Useful for removing self-reflections or near-field noise |
 | `max_range` | float | `0` | Maximum point range in meters. Points farther than this are discarded before ICP. 0 = no limit. Useful for removing noisy far-field points that hurt alignment |
 | `max_accel` | float | `0` | Maximum acceleration deviation from gravity in m/s². If the IMU reads acceleration above this threshold, the entire scan is rejected. 0 = no limit. Prevents adding blurry scans during fast motion or impacts |
+| `accel_holdoff` | float | `1.0` | Seconds to continue rejecting scans after acceleration drops below `max_accel`. Allows the sensor to stabilize before resuming mapping. Only active when `max_accel` > 0 |
 | `map_voxel_size` | float | `0.03` | Voxel grid filter size in meters for the accumulated map. Each cube of this side length keeps one point (at the centroid). Smaller = denser map, more memory. Larger = sparser, faster |
 | `map_downsample_interval` | int | `50` | Number of frames between voxel grid downsampling passes on the accumulated map. At 10Hz frame rate, 50 = every 5 seconds |
 | `camera_distance` | float | `10.0` | Initial camera distance from origin in meters. Larger = more zoomed out. Adjust based on the size of the environment you're mapping |
