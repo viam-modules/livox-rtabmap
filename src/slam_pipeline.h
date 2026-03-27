@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <string>
 
@@ -46,5 +47,7 @@ private:
     std::string db_path_;
     bool use_imu_ = false;
     float max_range_ = 0;
+    float max_accel_ = 0; // m/s², 0 = disabled
+    std::atomic<float> current_accel_{0};
     rtabmap::IMU last_imu_;
 };

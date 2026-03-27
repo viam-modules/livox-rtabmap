@@ -1,5 +1,6 @@
 #include "slam_pipeline.h"
 
+#include <cmath>
 #include <iostream>
 
 #include <rtabmap/core/Parameters.h>
@@ -66,6 +67,7 @@ bool SlamPipeline::init(const json &config) {
 
     use_imu_ = config.value("use_imu_prior", false);
     max_range_ = config.value("max_range", 0.0f);
+    max_accel_ = config.value("max_accel", 0.0f);
     db_path_ = config.value("database_path", "livox_slam.db");
 
     rtabmap_ = std::make_unique<rtabmap::Rtabmap>();
@@ -81,6 +83,12 @@ bool SlamPipeline::init(const json &config) {
 
 bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t timestamp_ns) {
     if (!odom_ || !rtabmap_) return false;
+
+    if (max_accel_ > 0 && current_accel_.load() > max_accel_) {
+        std::cerr << "[SLAM] Scan rejected: accel " << current_accel_.load()
+                  << " m/s² > max " << max_accel_ << "\n";
+        return false;
+    }
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr xyz(new pcl::PointCloud<pcl::PointXYZ>);
     xyz->reserve(cloud->size());
@@ -138,6 +146,10 @@ void SlamPipeline::processIMU(float gyro_x, float gyro_y, float gyro_z,
     const double g = 9.80665;
     cv::Vec3d angVel(gyro_x, gyro_y, gyro_z);           // rad/s
     cv::Vec3d linAcc(acc_x * g, acc_y * g, acc_z * g);  // m/s²
+
+    // Store magnitude of acceleration minus gravity for scan rejection
+    float accel_mag = std::sqrt(linAcc[0]*linAcc[0] + linAcc[1]*linAcc[1] + linAcc[2]*linAcc[2]);
+    current_accel_.store(std::abs(accel_mag - g)); // deviation from 1g
 
     // Let rtabmap handle IMU orientation estimation internally
     last_imu_ = rtabmap::IMU(
