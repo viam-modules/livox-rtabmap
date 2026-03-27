@@ -5,6 +5,7 @@
   "database_path": "livox_slam.db",
   "use_imu_prior": false,
   "load_previous_map": false,
+  "min_range": 0,
   "max_range": 0,
   "max_accel": 0,
   "map_voxel_size": 0.03,

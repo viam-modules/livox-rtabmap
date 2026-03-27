@@ -55,6 +55,7 @@ All parameters are in `config/default.json`. Edit and restart — no recompile n
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
+| `min_range` | float | `0` | Minimum point range in meters. Points closer than this are discarded before ICP. 0 = no limit. Useful for removing self-reflections or near-field noise |
 | `max_range` | float | `0` | Maximum point range in meters. Points farther than this are discarded before ICP. 0 = no limit. Useful for removing noisy far-field points that hurt alignment |
 | `max_accel` | float | `0` | Maximum acceleration deviation from gravity in m/s². If the IMU reads acceleration above this threshold, the entire scan is rejected. 0 = no limit. Prevents adding blurry scans during fast motion or impacts |
 | `map_voxel_size` | float | `0.03` | Voxel grid filter size in meters for the accumulated map. Each cube of this side length keeps one point (at the centroid). Smaller = denser map, more memory. Larger = sparser, faster |

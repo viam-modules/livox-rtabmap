@@ -46,6 +46,7 @@ private:
     int frame_count_ = 0;
     std::string db_path_;
     bool use_imu_ = false;
+    float min_range_ = 0;
     float max_range_ = 0;
     float max_accel_ = 0; // m/s², 0 = disabled
     std::atomic<float> current_accel_{0};
