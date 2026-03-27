@@ -265,12 +265,22 @@ int main(int argc, char *argv[]) {
                 display_cloud->push_back(rp);
             }
         } else {
-            // Intensity mode — map intensity to grayscale RGB
+            // Intensity mode — normalize to full range then map to rainbow
+            float imin = 1e9, imax = -1e9;
             for (const auto &mp : map_points) {
-                uint8_t v = std::min(255, std::max(0, (int)mp.intensity));
+                if (mp.intensity < imin) imin = mp.intensity;
+                if (mp.intensity > imax) imax = mp.intensity;
+            }
+            float irange = imax - imin;
+            if (irange < 1.0f) irange = 1.0f;
+            for (const auto &mp : map_points) {
+                float t = (mp.intensity - imin) / irange; // 0 = low, 1 = high
+                float hue = (1.0f - t) * 240.0f; // blue (low) → red (high)
+                uint8_t r, g, b;
+                hsv2rgb(hue, 1.0f, 1.0f, r, g, b);
                 pcl::PointXYZRGB rp;
                 rp.x = mp.x; rp.y = mp.y; rp.z = mp.z;
-                rp.r = v; rp.g = v; rp.b = v;
+                rp.r = r; rp.g = g; rp.b = b;
                 display_cloud->push_back(rp);
             }
         }
