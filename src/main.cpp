@@ -11,6 +11,7 @@
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
+#include <pcl/filters/voxel_grid.h>
 
 #include <rtabmap/gui/CloudViewer.h>
 #include <rtabmap/core/Transform.h>
@@ -139,6 +140,16 @@ int main(int argc, char *argv[]) {
 
         accumulated_map->width = accumulated_map->size();
         accumulated_map->height = 1;
+
+        // Downsample map every 50 frames to keep it manageable
+        if (frame_count % 50 == 0 && accumulated_map->size() > 100000) {
+            pcl::VoxelGrid<pcl::PointXYZI> voxel;
+            voxel.setInputCloud(accumulated_map);
+            voxel.setLeafSize(0.03f, 0.03f, 0.03f); // 30mm voxel
+            pcl::PointCloud<pcl::PointXYZI>::Ptr filtered(new pcl::PointCloud<pcl::PointXYZI>);
+            voxel.filter(*filtered);
+            accumulated_map = filtered;
+        }
 
         // Update viewer with accumulated map
         viewer.addCloud("map", accumulated_map, rtabmap::Transform::getIdentity(), QColor(180, 180, 180));
