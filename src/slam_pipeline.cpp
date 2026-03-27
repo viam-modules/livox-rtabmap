@@ -25,12 +25,14 @@ bool SlamPipeline::init() {
     params.insert({rtabmap::Parameters::kOdomStrategy(), "1"});  // ICP
     params.insert({rtabmap::Parameters::kRegStrategy(), "1"});   // ICP registration
 
-    // ICP parameters tuned for Mid-360 (~20k pts, indoor/outdoor)
+    // ICP parameters tuned for Mid-360 (~20k pts, indoor)
     params.insert({rtabmap::Parameters::kIcpPointToPlane(), "true"});
-    params.insert({rtabmap::Parameters::kIcpVoxelSize(), "0.05"});                // 50mm voxel
-    params.insert({rtabmap::Parameters::kIcpMaxCorrespondenceDistance(), "0.5"});  // 500mm
-    params.insert({rtabmap::Parameters::kIcpIterations(), "30"});
-    params.insert({rtabmap::Parameters::kIcpEpsilon(), "0.001"});
+    params.insert({rtabmap::Parameters::kIcpVoxelSize(), "0.02"});                // 20mm voxel
+    params.insert({rtabmap::Parameters::kIcpMaxCorrespondenceDistance(), "0.15"}); // 150mm
+    params.insert({rtabmap::Parameters::kIcpIterations(), "50"});
+    params.insert({rtabmap::Parameters::kIcpEpsilon(), "0.0001"});
+    params.insert({rtabmap::Parameters::kIcpMaxTranslation(), "0.3"});            // reject jumps > 300mm
+    params.insert({rtabmap::Parameters::kIcpMaxRotation(), "0.2"});               // reject jumps > ~12 degrees
 
     // RTAB-Map parameters
     params.insert({rtabmap::Parameters::kRtabmapDetectionRate(), "0"});     // process all
