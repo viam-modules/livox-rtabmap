@@ -3,6 +3,7 @@
   "host_ip": "192.168.1.10",
   "headless": false,
   "database_path": "livox_slam.db",
+  "use_imu_prior": false,
   "load_previous_map": false,
   "map_voxel_size": 0.03,
   "map_downsample_interval": 50,

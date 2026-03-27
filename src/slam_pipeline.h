@@ -9,6 +9,7 @@
 #include <rtabmap/core/Rtabmap.h>
 #include <rtabmap/core/Odometry.h>
 #include <rtabmap/core/SensorData.h>
+#include <rtabmap/core/IMU.h>
 
 #include <nlohmann/json.hpp>
 
@@ -22,6 +23,11 @@ public:
 
     // Process a new lidar frame. Returns true if odometry succeeded.
     bool processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t timestamp_ns);
+
+    // Feed IMU data for motion prior (called at 200Hz)
+    void processIMU(float gyro_x, float gyro_y, float gyro_z,
+                    float acc_x, float acc_y, float acc_z,
+                    uint64_t timestamp_ns);
 
     // Get the current pose
     rtabmap::Transform getPose() const;
@@ -38,4 +44,6 @@ private:
     rtabmap::Transform current_pose_;
     int frame_count_ = 0;
     std::string db_path_;
+    bool use_imu_ = false;
+    rtabmap::IMU last_imu_;
 };

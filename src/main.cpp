@@ -78,6 +78,11 @@ int main(int argc, char *argv[]) {
         bool ok = receiver.start(
             [&slam](pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t ts) {
                 slam.processCloud(cloud, ts);
+            },
+            [&slam](const LivoxIMU &imu) {
+                slam.processIMU(imu.gyro_x, imu.gyro_y, imu.gyro_z,
+                                imu.acc_x, imu.acc_y, imu.acc_z,
+                                imu.timestamp_ns);
             });
         if (!ok) {
             std::cerr << "Failed to start Livox receiver\n";
@@ -134,6 +139,11 @@ int main(int argc, char *argv[]) {
                 latest_pose = slam.getPose();
                 frame_count++;
             }
+        },
+        [&](const LivoxIMU &imu) {
+            slam.processIMU(imu.gyro_x, imu.gyro_y, imu.gyro_z,
+                            imu.acc_x, imu.acc_y, imu.acc_z,
+                            imu.timestamp_ns);
         });
 
     if (!ok) {

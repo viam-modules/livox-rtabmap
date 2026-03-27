@@ -8,6 +8,7 @@
 #include <rtabmap/core/CameraModel.h>
 #include <rtabmap/core/Signature.h>
 #include <rtabmap/core/Link.h>
+#include <rtabmap/core/IMU.h>
 #include <rtabmap/core/util3d.h>
 #include <rtabmap/utilite/ULogger.h>
 
@@ -63,6 +64,7 @@ bool SlamPipeline::init(const json &config) {
         return false;
     }
 
+    use_imu_ = config.value("use_imu_prior", false);
     db_path_ = config.value("database_path", "livox_slam.db");
 
     rtabmap_ = std::make_unique<rtabmap::Rtabmap>();
@@ -88,6 +90,10 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
     double stamp = static_cast<double>(timestamp_ns) / 1e9;
     rtabmap::LaserScan scan = rtabmap::util3d::laserScanFromPointCloud(*xyz);
     rtabmap::SensorData data(scan, cv::Mat(), cv::Mat(), rtabmap::CameraModel(), 0, stamp);
+
+    if (use_imu_) {
+        data.setIMU(last_imu_);
+    }
 
     rtabmap::OdometryInfo odom_info;
     rtabmap::Transform pose = odom_->process(data, &odom_info);
@@ -119,6 +125,26 @@ int SlamPipeline::getMapSize() const {
         return rtabmap_->getLastLocationId();
     }
     return 0;
+}
+
+void SlamPipeline::processIMU(float gyro_x, float gyro_y, float gyro_z,
+                              float acc_x, float acc_y, float acc_z,
+                              uint64_t timestamp_ns) {
+    if (!use_imu_) return;
+
+    const double g = 9.80665;
+    cv::Vec3d angVel(gyro_x, gyro_y, gyro_z);           // rad/s
+    cv::Vec3d linAcc(acc_x * g, acc_y * g, acc_z * g);  // m/s²
+
+    // Let rtabmap handle IMU orientation estimation internally
+    last_imu_ = rtabmap::IMU(
+        cv::Vec4d(0, 0, 0, 0),  // orientation unknown (let rtabmap estimate)
+        cv::Mat(),               // no orientation covariance
+        angVel,
+        cv::Mat(),               // no angular velocity covariance
+        linAcc,
+        cv::Mat()                // no linear acceleration covariance
+    );
 }
 
 pcl::PointCloud<pcl::PointXYZI>::Ptr SlamPipeline::rebuildMap() const {

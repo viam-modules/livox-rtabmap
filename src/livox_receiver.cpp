@@ -18,8 +18,11 @@ static void pointCloudCb(const uint32_t handle, const uint8_t dev_type,
     }
 }
 
-static void imuCb(const uint32_t, const uint8_t, LivoxLidarEthernetPacket *, void *) {
-    // IMU data not used for SLAM pipeline
+static void imuCb(const uint32_t handle, const uint8_t dev_type,
+                   LivoxLidarEthernetPacket *data, void *) {
+    if (data && g_receiver) {
+        g_receiver->handleIMU(handle, dev_type, data);
+    }
 }
 
 static void infoChangeCb(const uint32_t handle, const LivoxLidarInfo *info, void *) {
@@ -35,8 +38,9 @@ LivoxReceiver::~LivoxReceiver() {
     stop();
 }
 
-bool LivoxReceiver::start(FrameCallback frame_cb) {
+bool LivoxReceiver::start(FrameCallback frame_cb, IMUCallback imu_cb) {
     frame_cb_ = frame_cb;
+    imu_cb_ = imu_cb;
     g_receiver = this;
 
     config_path_ = generateConfig();
@@ -137,6 +141,23 @@ void LivoxReceiver::handleInfoChange(uint32_t handle, void *raw) {
     // Enable normal work mode + IMU
     SetLivoxLidarWorkMode(handle, kLivoxLidarNormal, nullptr, nullptr);
     EnableLivoxLidarImuData(handle, nullptr, nullptr);
+}
+
+void LivoxReceiver::handleIMU(uint32_t handle, uint8_t dev_type, void *raw) {
+    auto *pkt = static_cast<LivoxLidarEthernetPacket *>(raw);
+    if (pkt->data_type != kLivoxLidarImuData) return;
+
+    uint64_t ts;
+    memcpy(&ts, pkt->timestamp, sizeof(ts));
+
+    auto *imu = reinterpret_cast<LivoxLidarImuRawPoint *>(pkt->data);
+    if (imu_cb_) {
+        imu_cb_(LivoxIMU{
+            imu->gyro_x, imu->gyro_y, imu->gyro_z,
+            imu->acc_x, imu->acc_y, imu->acc_z,
+            ts
+        });
+    }
 }
 
 std::string LivoxReceiver::generateConfig() {

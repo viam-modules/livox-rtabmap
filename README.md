@@ -49,6 +49,7 @@ All parameters are in `config/default.json`. Edit and restart — no recompile n
 | `headless` | bool | `false` | If true, run without the Qt 3D viewer (console output only) |
 | `database_path` | string | `"livox_slam.db"` | Path to the rtabmap database file. SLAM state (poses, graph, sensor data) is saved here on exit and reloaded on next launch. Relative to the working directory |
 | `load_previous_map` | bool | `false` | If true, reconstruct and display the point cloud map from the existing database on startup. If false, start with an empty viewer (database is still loaded by rtabmap internally) |
+| `use_imu_prior` | bool | `false` | If true, feed Mid-360 IMU data (200Hz gyro + accelerometer) into rtabmap's odometry as a motion prior. Helps ICP converge during fast motion by giving it a starting guess close to the true pose |
 
 ### Map Display
 
