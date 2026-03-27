@@ -12,6 +12,7 @@
   "map_color": [180, 180, 180],
   "scan_color": [0, 255, 0],
   "camera_distance": 10.0,
+  "show_trajectory": true,
   "icp": {
     "point_to_plane": true,
     "voxel_size": 0.03,

@@ -1,4 +1,5 @@
 #include <atomic>
+#include <cmath>
 #include <csignal>
 #include <cstring>
 #include <filesystem>
@@ -7,6 +8,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <QApplication>
 #include <QTimer>
@@ -14,6 +16,7 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/filters/voxel_grid.h>
+#include <pcl/kdtree/kdtree_flann.h>
 
 #include <rtabmap/gui/CloudViewer.h>
 #include <rtabmap/core/Transform.h>
@@ -31,11 +34,34 @@ static void signalHandler(int) {
     running = false;
 }
 
+// HSV to RGB helper (h: 0-360, s: 0-1, v: 0-1)
+static void hsv2rgb(float h, float s, float v, uint8_t &r, uint8_t &g, uint8_t &b) {
+    float c = v * s;
+    float x = c * (1 - std::fabs(std::fmod(h / 60.0f, 2) - 1));
+    float m = v - c;
+    float rf, gf, bf;
+    if (h < 60)      { rf = c; gf = x; bf = 0; }
+    else if (h < 120) { rf = x; gf = c; bf = 0; }
+    else if (h < 180) { rf = 0; gf = c; bf = x; }
+    else if (h < 240) { rf = 0; gf = x; bf = c; }
+    else if (h < 300) { rf = x; gf = 0; bf = c; }
+    else              { rf = c; gf = 0; bf = x; }
+    r = (uint8_t)((rf + m) * 255);
+    g = (uint8_t)((gf + m) * 255);
+    b = (uint8_t)((bf + m) * 255);
+}
+
+// Per-point data for the accumulated map
+struct MapPoint {
+    float x, y, z;
+    float intensity;
+    int frame_id;  // which frame added this point
+};
+
 int main(int argc, char *argv[]) {
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
 
-    // Load config file (first arg, or default path)
     std::string config_path = "config/default.json";
     if (argc > 1 && argv[1][0] != '-') {
         config_path = argv[1];
@@ -54,6 +80,7 @@ int main(int argc, char *argv[]) {
     float map_voxel = config.value("map_voxel_size", 0.03f);
     int downsample_interval = config.value("map_downsample_interval", 50);
     std::string color_mode = config.value("color_mode", "intensity");
+    bool show_trajectory = config.value("show_trajectory", true);
 
     auto map_color_arr = config.value("map_color", std::vector<int>{180, 180, 180});
     auto scan_color_arr = config.value("scan_color", std::vector<int>{0, 255, 0});
@@ -66,7 +93,6 @@ int main(int argc, char *argv[]) {
               << "  Host:   " << host_ip << "\n"
               << "  Mode:   " << (headless ? "headless" : "GUI") << "\n\n";
 
-    // Init SLAM pipeline
     SlamPipeline slam;
     if (!slam.init(config)) {
         std::cerr << "Failed to init SLAM pipeline\n";
@@ -84,50 +110,42 @@ int main(int argc, char *argv[]) {
                                 imu.acc_x, imu.acc_y, imu.acc_z,
                                 imu.timestamp_ns);
             });
-        if (!ok) {
-            std::cerr << "Failed to start Livox receiver\n";
-            return 1;
-        }
-
-        while (running) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-        }
+        if (!ok) { std::cerr << "Failed to start Livox receiver\n"; return 1; }
+        while (running) std::this_thread::sleep_for(std::chrono::seconds(1));
         receiver.stop();
         return 0;
     }
 
     // GUI mode
     QApplication app(argc, argv);
-
     rtabmap::CloudViewer viewer;
     viewer.setWindowTitle("Livox Mid-360 SLAM");
     viewer.setBackgroundColor(QColor(20, 20, 20));
     viewer.setGridShown(true);
     viewer.resize(1280, 720);
     float cam_dist = config.value("camera_distance", 10.0f);
-    // 45° isometric: camera at equal x, y, z offset, looking at origin, Z up
-    float d = cam_dist / 1.732f; // divide by sqrt(3) so total distance = cam_dist
-    viewer.setCameraPosition(d, d, d,    // camera position
-                             0, 0, 0,    // focal point (origin)
-                             0, 0, 1);   // up vector (Z up, matches lidar frame)
+    float d = cam_dist / 1.732f;
+    viewer.setCameraPosition(d, d, d, 0, 0, 0, 0, 0, 1);
     viewer.show();
 
     std::mutex cloud_mu;
     pcl::PointCloud<pcl::PointXYZI>::Ptr latest_cloud;
     rtabmap::Transform latest_pose;
-    pcl::PointCloud<pcl::PointXYZI>::Ptr accumulated_map;
+    std::vector<MapPoint> map_points;
+    std::vector<std::pair<float, float>> trajectory_xz; // for trajectory line
+    int frame_count = 0;
+    int max_frame_id = 0;
+
     bool load_previous = config.value("load_previous_map", false);
     if (load_previous) {
-        accumulated_map = slam.rebuildMap();
-        if (accumulated_map->size() > 0) {
-            std::cout << "[VIEWER] Loaded " << accumulated_map->size() << " points from previous session\n";
-            viewer.addCloud("map", accumulated_map);
-            viewer.refreshView();
+        auto rebuilt = slam.rebuildMap();
+        if (rebuilt->size() > 0) {
+            std::cout << "[VIEWER] Loaded " << rebuilt->size() << " points from previous session\n";
+            for (const auto &p : *rebuilt) {
+                map_points.push_back({p.x, p.y, p.z, p.intensity, 0});
+            }
         }
-    } else {
-        accumulated_map = pcl::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
     }
-    int frame_count = 0;
 
     LivoxReceiver receiver(sensor_ip, host_ip);
     bool ok = receiver.start(
@@ -145,13 +163,9 @@ int main(int argc, char *argv[]) {
                             imu.acc_x, imu.acc_y, imu.acc_z,
                             imu.timestamp_ns);
         });
+    if (!ok) { std::cerr << "Failed to start Livox receiver\n"; return 1; }
 
-    if (!ok) {
-        std::cerr << "Failed to start Livox receiver\n";
-        return 1;
-    }
-
-    // Config live reload — check every 2 seconds
+    // Config live reload
     auto last_config_write = std::filesystem::last_write_time(config_path);
     QTimer config_timer;
     QObject::connect(&config_timer, &QTimer::timeout, [&]() {
@@ -159,19 +173,17 @@ int main(int argc, char *argv[]) {
             auto now = std::filesystem::last_write_time(config_path);
             if (now == last_config_write) return;
             last_config_write = now;
-
             std::ifstream rf(config_path);
             if (!rf) return;
             json new_config = json::parse(rf);
-
             map_voxel = new_config.value("map_voxel_size", map_voxel);
             downsample_interval = new_config.value("map_downsample_interval", downsample_interval);
             color_mode = new_config.value("color_mode", color_mode);
+            show_trajectory = new_config.value("show_trajectory", show_trajectory);
             auto mc = new_config.value("map_color", std::vector<int>{map_color.red(), map_color.green(), map_color.blue()});
             auto sc = new_config.value("scan_color", std::vector<int>{scan_color.red(), scan_color.green(), scan_color.blue()});
             map_color = QColor(mc[0], mc[1], mc[2]);
             scan_color = QColor(sc[0], sc[1], sc[2]);
-
             std::cout << "[CONFIG] Reloaded " << config_path << "\n";
         } catch (const std::exception &e) {
             std::cerr << "[CONFIG] Reload error: " << e.what() << "\n";
@@ -181,83 +193,131 @@ int main(int argc, char *argv[]) {
 
     QTimer update_timer;
     QObject::connect(&update_timer, &QTimer::timeout, [&]() {
-        if (!running) {
-            app.quit();
-            return;
-        }
+        if (!running) { app.quit(); return; }
 
         std::lock_guard<std::mutex> lock(cloud_mu);
         if (!latest_cloud) return;
 
+        max_frame_id = frame_count;
+
+        // Transform and accumulate points
         for (const auto &p : *latest_cloud) {
-            pcl::PointXYZI tp;
             float x = p.x, y = p.y, z = p.z;
-            const float *data = latest_pose.data();
-            tp.x = data[0]*x + data[1]*y + data[2]*z + data[3];
-            tp.y = data[4]*x + data[5]*y + data[6]*z + data[7];
-            tp.z = data[8]*x + data[9]*y + data[10]*z + data[11];
-            tp.intensity = p.intensity;
-            accumulated_map->push_back(tp);
+            const float *d = latest_pose.data();
+            MapPoint mp;
+            mp.x = d[0]*x + d[1]*y + d[2]*z + d[3];
+            mp.y = d[4]*x + d[5]*y + d[6]*z + d[7];
+            mp.z = d[8]*x + d[9]*y + d[10]*z + d[11];
+            mp.intensity = p.intensity;
+            mp.frame_id = frame_count;
+            map_points.push_back(mp);
         }
 
-        accumulated_map->width = accumulated_map->size();
-        accumulated_map->height = 1;
+        // Track trajectory
+        float tx = latest_pose.x(), ty = latest_pose.y(), tz = latest_pose.z();
+        trajectory_xz.push_back({tx, ty});
 
-        if (frame_count % downsample_interval == 0 && accumulated_map->size() > 100000) {
-            pcl::VoxelGrid<pcl::PointXYZI> voxel;
-            voxel.setInputCloud(accumulated_map);
-            voxel.setLeafSize(map_voxel, map_voxel, map_voxel);
-            pcl::PointCloud<pcl::PointXYZI>::Ptr filtered(new pcl::PointCloud<pcl::PointXYZI>);
-            voxel.filter(*filtered);
-            accumulated_map = filtered;
-        }
+        // Build colored cloud for display
+        auto display_cloud = pcl::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
+        display_cloud->reserve(map_points.size());
 
-        if (color_mode == "flat") {
-            // Convert to XYZRGB for flat coloring
-            auto map_rgb = pcl::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
-            map_rgb->reserve(accumulated_map->size());
-            for (const auto &p : *accumulated_map) {
+        if (color_mode == "age") {
+            // Blue (old) → Red (new)
+            for (const auto &mp : map_points) {
+                float age = (max_frame_id > 1) ? (float)mp.frame_id / max_frame_id : 1.0f;
+                // 240° = blue, 0° = red
+                float hue = (1.0f - age) * 240.0f;
+                uint8_t r, g, b;
+                hsv2rgb(hue, 1.0f, 1.0f, r, g, b);
                 pcl::PointXYZRGB rp;
-                rp.x = p.x; rp.y = p.y; rp.z = p.z;
+                rp.x = mp.x; rp.y = mp.y; rp.z = mp.z;
+                rp.r = r; rp.g = g; rp.b = b;
+                display_cloud->push_back(rp);
+            }
+        } else if (color_mode == "flat") {
+            for (const auto &mp : map_points) {
+                pcl::PointXYZRGB rp;
+                rp.x = mp.x; rp.y = mp.y; rp.z = mp.z;
                 rp.r = map_color.red(); rp.g = map_color.green(); rp.b = map_color.blue();
-                map_rgb->push_back(rp);
+                display_cloud->push_back(rp);
             }
-            map_rgb->width = map_rgb->size(); map_rgb->height = 1;
-            viewer.addCloud("map", map_rgb);
-
-            auto scan_rgb = pcl::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
-            scan_rgb->reserve(latest_cloud->size());
-            for (const auto &p : *latest_cloud) {
-                pcl::PointXYZRGB rp;
-                rp.x = p.x; rp.y = p.y; rp.z = p.z;
-                rp.r = scan_color.red(); rp.g = scan_color.green(); rp.b = scan_color.blue();
-                scan_rgb->push_back(rp);
-            }
-            scan_rgb->width = scan_rgb->size(); scan_rgb->height = 1;
-            viewer.addCloud("scan", scan_rgb, latest_pose);
         } else {
-            // Intensity coloring (default) — pass default QColor so viewer uses intensity handler
-            viewer.addCloud("map", accumulated_map);
-            viewer.addCloud("scan", latest_cloud, latest_pose);
+            // Intensity mode — map intensity to grayscale RGB
+            for (const auto &mp : map_points) {
+                uint8_t v = std::min(255, std::max(0, (int)mp.intensity));
+                pcl::PointXYZRGB rp;
+                rp.x = mp.x; rp.y = mp.y; rp.z = mp.z;
+                rp.r = v; rp.g = v; rp.b = v;
+                display_cloud->push_back(rp);
+            }
         }
+        display_cloud->width = display_cloud->size();
+        display_cloud->height = 1;
+
+        // Voxel downsample periodically
+        if (frame_count % downsample_interval == 0 && map_points.size() > 100000) {
+            // Downsample the display cloud
+            pcl::VoxelGrid<pcl::PointXYZRGB> voxel;
+            voxel.setInputCloud(display_cloud);
+            voxel.setLeafSize(map_voxel, map_voxel, map_voxel);
+            auto filtered = pcl::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
+            voxel.filter(*filtered);
+            display_cloud = filtered;
+
+            // Also trim map_points to match (approximate — rebuild from display cloud)
+            map_points.clear();
+            for (const auto &p : *display_cloud) {
+                map_points.push_back({p.x, p.y, p.z, 128.0f, frame_count});
+            }
+        }
+
+        viewer.addCloud("map", display_cloud);
+
+        // Current scan in scan_color
+        auto scan_rgb = pcl::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
+        scan_rgb->reserve(latest_cloud->size());
+        for (const auto &p : *latest_cloud) {
+            pcl::PointXYZRGB rp;
+            rp.x = p.x; rp.y = p.y; rp.z = p.z;
+            rp.r = scan_color.red(); rp.g = scan_color.green(); rp.b = scan_color.blue();
+            scan_rgb->push_back(rp);
+        }
+        scan_rgb->width = scan_rgb->size(); scan_rgb->height = 1;
+        viewer.addCloud("scan", scan_rgb, latest_pose);
+
+        // Draw trajectory
+        if (show_trajectory && trajectory_xz.size() > 1) {
+            viewer.removeCloud("trajectory");
+            auto traj_cloud = pcl::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
+            for (size_t i = 0; i < trajectory_xz.size(); i++) {
+                pcl::PointXYZRGB tp;
+                tp.x = trajectory_xz[i].first;
+                tp.y = trajectory_xz[i].second;
+                tp.z = 0;  // project onto ground plane
+                tp.r = 255; tp.g = 255; tp.b = 0; // yellow trajectory
+                traj_cloud->push_back(tp);
+            }
+            traj_cloud->width = traj_cloud->size(); traj_cloud->height = 1;
+            viewer.addCloud("trajectory", traj_cloud);
+        }
+
         latest_cloud.reset();
 
-        viewer.setWindowTitle(QString("Livox SLAM | Frame %1 | Map: %2 pts")
+        viewer.setWindowTitle(QString("Livox SLAM | Frame %1 | Map: %2 pts | %3")
             .arg(frame_count)
-            .arg(accumulated_map->size()));
+            .arg(map_points.size())
+            .arg(QString::fromStdString(color_mode)));
 
         viewer.refreshView();
     });
     update_timer.start(33);
 
     int ret = app.exec();
-
     running = false;
     receiver.stop();
 
     std::cout << "\nFinal: " << slam.getFrameCount() << " frames, "
-              << accumulated_map->size() << " map points\n"
+              << map_points.size() << " map points\n"
               << "Database saved to: " << slam.getDatabasePath() << "\n";
-
     return ret;
 }
