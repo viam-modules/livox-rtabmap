@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(livox_rtabmap LANGUAGES CXX)
+project(livox_rtabmap LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,7 +10,10 @@ find_package(PCL REQUIRED COMPONENTS common io filters)
 find_package(Qt5 REQUIRED COMPONENTS Widgets)
 
 # Build Livox-SDK2 static library
+# Patch: disable -Werror and add -include cstdint for GCC 13+
 set(LIVOX_SDK_DIR ${CMAKE_SOURCE_DIR}/third_party/Livox-SDK2)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error -include cstdint")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-error")
 add_subdirectory(${LIVOX_SDK_DIR} ${CMAKE_BINARY_DIR}/livox-sdk2)
 
 # Main executable
@@ -27,9 +30,9 @@ target_include_directories(livox_rtabmap PRIVATE
 
 target_link_libraries(livox_rtabmap PRIVATE
     livox_lidar_sdk_static
-    RTABMap::rtabmap_core
-    RTABMap::rtabmap_gui
-    RTABMap::rtabmap_utilite
+    rtabmap::core
+    rtabmap::gui
+    rtabmap::utilite
     ${PCL_LIBRARIES}
     Qt5::Widgets
     pthread

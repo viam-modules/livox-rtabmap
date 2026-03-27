@@ -2,13 +2,14 @@
 
 #include <iostream>
 
-#include <pcl/conversions.h>
-#include <pcl/PCLPointCloud2.h>
-
 #include <rtabmap/core/Parameters.h>
+#include <rtabmap/core/Odometry.h>
+#include <rtabmap/core/OdometryInfo.h>
+#include <rtabmap/core/CameraModel.h>
 #include <rtabmap/core/util3d.h>
-#include <rtabmap/core/util3d_filtering.h>
 #include <rtabmap/utilite/ULogger.h>
+
+#include <opencv2/core.hpp>
 
 SlamPipeline::SlamPipeline() {}
 
@@ -20,27 +21,31 @@ SlamPipeline::~SlamPipeline() {
 
 bool SlamPipeline::init() {
     // Configure ICP odometry
-    rtabmap::ParametersMap odom_params;
-    odom_params.insert({rtabmap::Parameters::kOdomStrategy(), "1"});  // ICP
-    odom_params.insert({rtabmap::Parameters::kRegStrategy(), "1"});   // ICP registration
+    rtabmap::ParametersMap params;
+    params.insert({rtabmap::Parameters::kOdomStrategy(), "1"});  // ICP
+    params.insert({rtabmap::Parameters::kRegStrategy(), "1"});   // ICP registration
+
     // ICP parameters tuned for Mid-360 (~20k pts, indoor/outdoor)
-    odom_params.insert({rtabmap::Parameters::kIcpPointToPlane(), "true"});
-    odom_params.insert({rtabmap::Parameters::kIcpVoxelSize(), "0.05"});           // 50mm voxel
-    odom_params.insert({rtabmap::Parameters::kIcpMaxCorrespondenceDistance(), "0.5"});  // 500mm
-    odom_params.insert({rtabmap::Parameters::kIcpIterations(), "30"});
-    odom_params.insert({rtabmap::Parameters::kIcpEpsilon(), "0.001"});
+    params.insert({rtabmap::Parameters::kIcpPointToPlane(), "true"});
+    params.insert({rtabmap::Parameters::kIcpVoxelSize(), "0.05"});                // 50mm voxel
+    params.insert({rtabmap::Parameters::kIcpMaxCorrespondenceDistance(), "0.5"});  // 500mm
+    params.insert({rtabmap::Parameters::kIcpIterations(), "30"});
+    params.insert({rtabmap::Parameters::kIcpEpsilon(), "0.001"});
 
-    odom_ = std::make_unique<rtabmap::OdometryICP>(odom_params);
+    // RTAB-Map parameters
+    params.insert({rtabmap::Parameters::kRtabmapDetectionRate(), "0"});     // process all
+    params.insert({rtabmap::Parameters::kRGBDProximityBySpace(), "true"});
+    params.insert({rtabmap::Parameters::kRGBDLinearUpdate(), "0.1"});       // 100mm movement
+    params.insert({rtabmap::Parameters::kRGBDAngularUpdate(), "0.1"});      // ~6 degrees
 
-    // Configure RTAB-Map
-    rtabmap::ParametersMap rtabmap_params;
-    rtabmap_params.insert({rtabmap::Parameters::kRtabmapDetectionRate(), "0"});  // process all
-    rtabmap_params.insert({rtabmap::Parameters::kRGBDProximityBySpace(), "true"});
-    rtabmap_params.insert({rtabmap::Parameters::kRGBDLinearUpdate(), "0.1"});    // 100mm movement
-    rtabmap_params.insert({rtabmap::Parameters::kRGBDAngularUpdate(), "0.1"});   // ~6 degrees
+    odom_.reset(rtabmap::Odometry::create(params));
+    if (!odom_) {
+        std::cerr << "[SLAM] Failed to create odometry\n";
+        return false;
+    }
 
     rtabmap_ = std::make_unique<rtabmap::Rtabmap>();
-    rtabmap_->init(rtabmap_params);
+    rtabmap_->init(params);
 
     std::cout << "[SLAM] Pipeline initialized (ICP odometry + RTAB-Map)\n";
     return true;
@@ -49,15 +54,19 @@ bool SlamPipeline::init() {
 bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t timestamp_ns) {
     if (!odom_ || !rtabmap_) return false;
 
-    // Convert PCL cloud to rtabmap LaserScan
-    // rtabmap expects laser scan data for ICP odometry
-    pcl::PCLPointCloud2 pcl2;
-    pcl::toPCLPointCloud2(*cloud, pcl2);
+    // Convert PCL PointXYZI cloud to rtabmap LaserScan
+    // rtabmap's laserScanFromPointCloud works with PointXYZ, so strip intensity
+    pcl::PointCloud<pcl::PointXYZ>::Ptr xyz(new pcl::PointCloud<pcl::PointXYZ>);
+    xyz->reserve(cloud->size());
+    for (const auto &p : *cloud) {
+        xyz->push_back(pcl::PointXYZ(p.x, p.y, p.z));
+    }
 
-    // Create sensor data with laser scan
     double stamp = static_cast<double>(timestamp_ns) / 1e9;
-    rtabmap::LaserScan scan = rtabmap::util3d::laserScanFromPointCloud(*cloud);
-    rtabmap::SensorData data(scan, 0, stamp);
+    rtabmap::LaserScan scan = rtabmap::util3d::laserScanFromPointCloud(*xyz);
+
+    // Use the RGB-D + laser scan constructor with empty images
+    rtabmap::SensorData data(scan, cv::Mat(), cv::Mat(), rtabmap::CameraModel(), 0, stamp);
 
     // Run odometry
     rtabmap::OdometryInfo odom_info;
@@ -77,7 +86,6 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
     if (frame_count_ % 10 == 0) {
         std::cout << "[SLAM] Frame " << frame_count_
                   << " | pose: " << pose.prettyPrint()
-                  << " | map nodes: " << rtabmap_->getMemory()->getWorkingMem().size()
                   << "\n";
     }
 
@@ -89,8 +97,8 @@ rtabmap::Transform SlamPipeline::getPose() const {
 }
 
 int SlamPipeline::getMapSize() const {
-    if (rtabmap_ && rtabmap_->getMemory()) {
-        return rtabmap_->getMemory()->getWorkingMem().size();
+    if (rtabmap_) {
+        return rtabmap_->getLastLocationId();
     }
     return 0;
 }
