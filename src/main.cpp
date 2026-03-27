@@ -152,10 +152,11 @@ int main(int argc, char *argv[]) {
     LivoxReceiver receiver(sensor_ip, host_ip);
     bool ok = receiver.start(
         [&](pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t ts) {
-            bool success = slam.processCloud(cloud, ts);
+            pcl::PointCloud<pcl::PointXYZI>::Ptr filtered;
+            bool success = slam.processCloud(cloud, ts, &filtered);
             if (success) {
                 std::lock_guard<std::mutex> lock(cloud_mu);
-                latest_cloud = cloud;
+                latest_cloud = filtered ? filtered : cloud;
                 latest_pose = slam.getPose();
                 frame_count++;
             }

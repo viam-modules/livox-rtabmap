@@ -23,7 +23,9 @@ public:
     std::string getDatabasePath() const { return db_path_; }
 
     // Process a new lidar frame. Returns true if odometry succeeded.
-    bool processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t timestamp_ns);
+    // filtered_cloud is set to the range-filtered cloud for display.
+    bool processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t timestamp_ns,
+                      pcl::PointCloud<pcl::PointXYZI>::Ptr *filtered_cloud = nullptr);
 
     // Feed IMU data for motion prior (called at 200Hz)
     void processIMU(float gyro_x, float gyro_y, float gyro_z,

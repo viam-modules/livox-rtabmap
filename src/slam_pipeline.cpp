@@ -82,7 +82,8 @@ bool SlamPipeline::init(const json &config) {
     return true;
 }
 
-bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t timestamp_ns) {
+bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t timestamp_ns,
+                                pcl::PointCloud<pcl::PointXYZI>::Ptr *filtered_cloud) {
     if (!odom_ || !rtabmap_) return false;
 
     if (max_accel_ > 0 && current_accel_.load() > max_accel_) {
@@ -92,7 +93,9 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
     }
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr xyz(new pcl::PointCloud<pcl::PointXYZ>);
+    auto xyzi_filtered = pcl::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
     xyz->reserve(cloud->size());
+    xyzi_filtered->reserve(cloud->size());
     float min_r2 = min_range_ * min_range_;
     float max_r2 = max_range_ * max_range_;
     for (const auto &p : *cloud) {
@@ -100,6 +103,10 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
         if (min_range_ > 0 && r2 < min_r2) continue;
         if (max_range_ > 0 && r2 > max_r2) continue;
         xyz->push_back(pcl::PointXYZ(p.x, p.y, p.z));
+        xyzi_filtered->push_back(p);
+    }
+    if (filtered_cloud) {
+        *filtered_cloud = xyzi_filtered;
     }
 
     double stamp = static_cast<double>(timestamp_ns) / 1e9;
