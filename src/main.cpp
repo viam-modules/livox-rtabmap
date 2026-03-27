@@ -110,14 +110,19 @@ int main(int argc, char *argv[]) {
     std::mutex cloud_mu;
     pcl::PointCloud<pcl::PointXYZI>::Ptr latest_cloud;
     rtabmap::Transform latest_pose;
-    pcl::PointCloud<pcl::PointXYZI>::Ptr accumulated_map = slam.rebuildMap();
-    int frame_count = 0;
-
-    if (accumulated_map->size() > 0) {
-        std::cout << "[VIEWER] Loaded " << accumulated_map->size() << " points from previous session\n";
-        viewer.addCloud("map", accumulated_map);
-        viewer.refreshView();
+    pcl::PointCloud<pcl::PointXYZI>::Ptr accumulated_map;
+    bool load_previous = config.value("load_previous_map", false);
+    if (load_previous) {
+        accumulated_map = slam.rebuildMap();
+        if (accumulated_map->size() > 0) {
+            std::cout << "[VIEWER] Loaded " << accumulated_map->size() << " points from previous session\n";
+            viewer.addCloud("map", accumulated_map);
+            viewer.refreshView();
+        }
+    } else {
+        accumulated_map = pcl::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
     }
+    int frame_count = 0;
 
     LivoxReceiver receiver(sensor_ip, host_ip);
     bool ok = receiver.start(
