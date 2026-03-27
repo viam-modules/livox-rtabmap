@@ -1,0 +1,85 @@
+# Livox Mid-360 → RTAB-Map Live SLAM
+
+Standalone C++ application that feeds Livox Mid-360 LiDAR point clouds into RTAB-Map for live ICP-based SLAM with a 3D viewer.
+
+## Build
+
+```bash
+# Dependencies (Ubuntu 24.04)
+sudo apt install libpcl-dev qtbase5-dev libopenmpi-dev nlohmann-json3-dev cmake
+
+# Build rtabmap from source (not in Ubuntu 24.04 repos)
+git clone --depth 1 https://github.com/introlab/rtabmap.git /tmp/rtabmap
+cd /tmp/rtabmap && mkdir build && cd build && cmake .. && make -j$(nproc) && sudo make install && sudo ldconfig
+
+# Build this project
+git submodule update --init
+mkdir build && cd build && cmake .. && make -j$(nproc)
+```
+
+## Usage
+
+```bash
+# GUI mode (default config)
+./build/livox_rtabmap
+
+# GUI mode with custom config
+./build/livox_rtabmap /path/to/config.json
+
+# Headless mode (set "headless": true in config)
+```
+
+The viewer shows the accumulated map in real time. Mouse to rotate/zoom/pan. Close the window or Ctrl+C to stop. The SLAM database is saved automatically on exit.
+
+## Configuration
+
+All parameters are in `config/default.json`. Edit and restart — no recompile needed.
+
+### Network
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `sensor_ip` | string | `"192.168.1.196"` | IP address of the Livox Mid-360 |
+| `host_ip` | string | `"192.168.1.10"` | IP address of the host machine on the same subnet as the lidar |
+
+### General
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `headless` | bool | `false` | If true, run without the Qt 3D viewer (console output only) |
+| `database_path` | string | `"livox_slam.db"` | Path to the rtabmap database file. SLAM state (poses, graph, sensor data) is saved here on exit and reloaded on next launch. Relative to the working directory |
+
+### Map Display
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `map_voxel_size` | float | `0.03` | Voxel grid filter size in meters for the accumulated map. Each cube of this side length keeps one point (at the centroid). Smaller = denser map, more memory. Larger = sparser, faster |
+| `map_downsample_interval` | int | `50` | Number of frames between voxel grid downsampling passes on the accumulated map. At 10Hz frame rate, 50 = every 5 seconds |
+| `color_mode` | string | `"intensity"` | How to color points in the viewer. `"intensity"`: yellow-orange gradient from lidar reflectivity. `"flat"`: solid colors from `map_color` and `scan_color` |
+| `map_color` | [R,G,B] | `[180, 180, 180]` | RGB color for accumulated map points when `color_mode` is `"flat"` (0-255 per channel) |
+| `scan_color` | [R,G,B] | `[0, 255, 0]` | RGB color for the current scan when `color_mode` is `"flat"` (0-255 per channel) |
+
+### ICP Odometry (`icp` section)
+
+These control how consecutive lidar scans are aligned to estimate frame-to-frame motion.
+
+| Parameter | Type | Default | Unit | Description |
+|-----------|------|---------|------|-------------|
+| `point_to_plane` | bool | `true` | — | Use point-to-plane ICP (more accurate for flat surfaces) vs point-to-point |
+| `voxel_size` | float | `0.03` | meters | Downsample input scans to this voxel size before ICP alignment. Smaller = more precise but slower. 0.03 = 30mm |
+| `max_correspondence_distance` | float | `0.25` | meters | Maximum distance between two points to be considered a correspondence pair. Too large = wrong matches. Too small = not enough matches. 0.25 = 250mm |
+| `iterations` | int | `40` | — | Maximum ICP optimization iterations per frame. More = better convergence, slower |
+| `epsilon` | float | `0.0005` | meters | Convergence threshold. ICP stops early if improvement is below this. 0.0005 = 0.5mm |
+| `max_translation` | float | `0.5` | meters | Reject odometry results with translation larger than this between consecutive frames. Prevents jumps from bad ICP convergence. 0.5 = 500mm |
+| `max_rotation` | float | `0.3` | radians | Reject odometry results with rotation larger than this between consecutive frames. 0.3 = ~17 degrees |
+
+### RTAB-Map (`rtabmap` section)
+
+These control the graph SLAM backend (loop closure, map management).
+
+| Parameter | Type | Default | Unit | Description |
+|-----------|------|---------|------|-------------|
+| `detection_rate` | int | `0` | Hz | Rate limit for processing frames into the SLAM graph. 0 = process every frame. Set to e.g. 1 to only add one node per second |
+| `proximity_by_space` | bool | `true` | — | Enable spatial proximity detection for loop closure candidates. When true, nearby poses in space (not just in sequence) are checked for loop closures |
+| `linear_update` | float | `0.1` | meters | Minimum translation since last node to add a new node to the graph. 0.1 = 100mm. Prevents adding redundant nodes when stationary |
+| `angular_update` | float | `0.1` | radians | Minimum rotation since last node to add a new node to the graph. 0.1 = ~6 degrees |
