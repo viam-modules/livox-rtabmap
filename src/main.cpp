@@ -157,6 +157,8 @@ int main(int argc, char *argv[]) {
         viewer.setWindowTitle(QString("Livox SLAM | Frame %1 | Map: %2 pts")
             .arg(frame_count)
             .arg(accumulated_map->size()));
+
+        viewer.update();
     });
     update_timer.start(33);
 
