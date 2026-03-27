@@ -6,6 +6,8 @@
 #include <rtabmap/core/Odometry.h>
 #include <rtabmap/core/OdometryInfo.h>
 #include <rtabmap/core/CameraModel.h>
+#include <rtabmap/core/Signature.h>
+#include <rtabmap/core/Link.h>
 #include <rtabmap/core/util3d.h>
 #include <rtabmap/utilite/ULogger.h>
 
@@ -117,4 +119,41 @@ int SlamPipeline::getMapSize() const {
         return rtabmap_->getLastLocationId();
     }
     return 0;
+}
+
+pcl::PointCloud<pcl::PointXYZI>::Ptr SlamPipeline::rebuildMap() const {
+    auto map = pcl::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+    if (!rtabmap_) return map;
+
+    std::map<int, rtabmap::Signature> signatures;
+    std::map<int, rtabmap::Transform> poses;
+    std::multimap<int, rtabmap::Link> constraints;
+    rtabmap_->get3DMap(signatures, poses, constraints, true, true);
+
+    std::cout << "[SLAM] Rebuilding map from " << poses.size() << " nodes\n";
+
+    for (auto &[id, pose] : poses) {
+        if (pose.isNull()) continue;
+        auto it = signatures.find(id);
+        if (it == signatures.end()) continue;
+
+        rtabmap::LaserScan scan = it->second.sensorData().laserScanRaw();
+        if (scan.isEmpty()) {
+            it->second.sensorData().uncompressData(nullptr, nullptr, &scan);
+        }
+        if (scan.isEmpty()) continue;
+
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = rtabmap::util3d::laserScanToPointCloud(scan, pose);
+        for (const auto &p : *cloud) {
+            pcl::PointXYZI pi;
+            pi.x = p.x; pi.y = p.y; pi.z = p.z;
+            pi.intensity = 128;
+            map->push_back(pi);
+        }
+    }
+
+    map->width = map->size();
+    map->height = 1;
+    std::cout << "[SLAM] Rebuilt map: " << map->size() << " points from " << poses.size() << " nodes\n";
+    return map;
 }

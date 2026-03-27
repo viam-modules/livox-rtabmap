@@ -29,6 +29,9 @@ public:
     int getMapSize() const;
     int getFrameCount() const { return frame_count_; }
 
+    // Reconstruct accumulated map from database
+    pcl::PointCloud<pcl::PointXYZI>::Ptr rebuildMap() const;
+
 private:
     std::unique_ptr<rtabmap::Odometry> odom_;
     std::unique_ptr<rtabmap::Rtabmap> rtabmap_;
