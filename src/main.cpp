@@ -81,6 +81,7 @@ int main(int argc, char *argv[]) {
     int downsample_interval = config.value("map_downsample_interval", 50);
     std::string color_mode = config.value("color_mode", "intensity");
     bool show_trajectory = config.value("show_trajectory", true);
+    int map_add_interval = config.value("map_add_interval", 1);
 
     auto map_color_arr = config.value("map_color", std::vector<int>{180, 180, 180});
     auto scan_color_arr = config.value("scan_color", std::vector<int>{0, 255, 0});
@@ -179,6 +180,7 @@ int main(int argc, char *argv[]) {
             std::ifstream rf(config_path);
             if (!rf) return;
             json new_config = json::parse(rf);
+            map_add_interval = new_config.value("map_add_interval", map_add_interval);
             map_voxel = new_config.value("map_voxel_size", map_voxel);
             downsample_interval = new_config.value("map_downsample_interval", downsample_interval);
             color_mode = new_config.value("color_mode", color_mode);
@@ -205,8 +207,9 @@ int main(int argc, char *argv[]) {
 
         max_frame_id = frame_count;
 
-        // Transform and accumulate points
-        for (const auto &p : *latest_cloud) {
+        // Transform and accumulate points (only every map_add_interval frames)
+        bool add_to_map = (map_add_interval <= 1) || (frame_count % map_add_interval == 0);
+        if (add_to_map) for (const auto &p : *latest_cloud) {
             float x = p.x, y = p.y, z = p.z;
             const float *d = latest_pose.data();
             MapPoint mp;
