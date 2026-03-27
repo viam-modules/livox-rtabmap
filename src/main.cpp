@@ -277,21 +277,51 @@ int main(int argc, char *argv[]) {
         display_cloud->width = display_cloud->size();
         display_cloud->height = 1;
 
-        // Voxel downsample periodically
+        // Voxel downsample periodically — filter map_points via PointXYZI to preserve intensity
         if (frame_count % downsample_interval == 0 && map_points.size() > 100000) {
-            // Downsample the display cloud
-            pcl::VoxelGrid<pcl::PointXYZRGB> voxel;
-            voxel.setInputCloud(display_cloud);
-            voxel.setLeafSize(map_voxel, map_voxel, map_voxel);
-            auto filtered = pcl::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
-            voxel.filter(*filtered);
-            display_cloud = filtered;
-
-            // Also trim map_points to match (approximate — rebuild from display cloud)
-            map_points.clear();
-            for (const auto &p : *display_cloud) {
-                map_points.push_back({p.x, p.y, p.z, 128.0f, frame_count});
+            auto xyzi = pcl::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+            xyzi->reserve(map_points.size());
+            for (const auto &mp : map_points) {
+                pcl::PointXYZI p;
+                p.x = mp.x; p.y = mp.y; p.z = mp.z;
+                p.intensity = mp.intensity;
+                xyzi->push_back(p);
             }
+            xyzi->width = xyzi->size(); xyzi->height = 1;
+
+            pcl::VoxelGrid<pcl::PointXYZI> voxel;
+            voxel.setInputCloud(xyzi);
+            voxel.setLeafSize(map_voxel, map_voxel, map_voxel);
+            auto filtered = pcl::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+            voxel.filter(*filtered);
+
+            map_points.clear();
+            map_points.reserve(filtered->size());
+            for (const auto &p : *filtered) {
+                map_points.push_back({p.x, p.y, p.z, p.intensity, frame_count});
+            }
+
+            // Rebuild display cloud from filtered map_points
+            display_cloud->clear();
+            display_cloud->reserve(map_points.size());
+            for (const auto &mp : map_points) {
+                pcl::PointXYZRGB rp;
+                rp.x = mp.x; rp.y = mp.y; rp.z = mp.z;
+                if (color_mode == "age") {
+                    float age = (max_frame_id > 1) ? (float)mp.frame_id / max_frame_id : 1.0f;
+                    hsv2rgb((1.0f - age) * 240.0f, 1.0f, 1.0f, rp.r, rp.g, rp.b);
+                } else if (color_mode == "height") {
+                    // will be slightly off since we lost zmin/zmax, but acceptable
+                    rp.r = rp.g = rp.b = std::min(255, std::max(0, (int)mp.intensity));
+                } else if (color_mode == "flat") {
+                    rp.r = map_color.red(); rp.g = map_color.green(); rp.b = map_color.blue();
+                } else {
+                    uint8_t v = std::min(255, std::max(0, (int)mp.intensity));
+                    rp.r = v; rp.g = v; rp.b = v;
+                }
+                display_cloud->push_back(rp);
+            }
+            display_cloud->width = display_cloud->size(); display_cloud->height = 1;
         }
 
         viewer.addCloud("map", display_cloud);
