@@ -59,7 +59,7 @@ All parameters are in `config/default.json`. Edit and restart — no recompile n
 | `map_voxel_size` | float | `0.03` | Voxel grid filter size in meters for the accumulated map. Each cube of this side length keeps one point (at the centroid). Smaller = denser map, more memory. Larger = sparser, faster |
 | `map_downsample_interval` | int | `50` | Number of frames between voxel grid downsampling passes on the accumulated map. At 10Hz frame rate, 50 = every 5 seconds |
 | `camera_distance` | float | `10.0` | Initial camera distance from origin in meters. Larger = more zoomed out. Adjust based on the size of the environment you're mapping |
-| `color_mode` | string | `"intensity"` | How to color map points. `"intensity"`: grayscale from reflectivity. `"flat"`: solid color from `map_color`. `"age"`: blue (old) → red (new) gradient to visualize convergence — overlapping colors mean good alignment, smearing means drift |
+| `color_mode` | string | `"intensity"` | How to color map points. `"intensity"`: grayscale from reflectivity. `"flat"`: solid color from `map_color`. `"age"`: blue (old) → red (new) to visualize convergence. `"height"`: blue (low) → red (high) rainbow by Z coordinate |
 | `map_color` | [R,G,B] | `[180, 180, 180]` | RGB color for accumulated map points when `color_mode` is `"flat"` (0-255 per channel) |
 | `scan_color` | [R,G,B] | `[0, 255, 0]` | RGB color for the current scan overlay (0-255 per channel) |
 | `show_trajectory` | bool | `true` | Show the odometry trajectory as yellow points projected onto the ground plane. Useful for spotting drift — a straight walk should show a straight line |

@@ -225,8 +225,26 @@ int main(int argc, char *argv[]) {
             // Blue (old) → Red (new)
             for (const auto &mp : map_points) {
                 float age = (max_frame_id > 1) ? (float)mp.frame_id / max_frame_id : 1.0f;
-                // 240° = blue, 0° = red
                 float hue = (1.0f - age) * 240.0f;
+                uint8_t r, g, b;
+                hsv2rgb(hue, 1.0f, 1.0f, r, g, b);
+                pcl::PointXYZRGB rp;
+                rp.x = mp.x; rp.y = mp.y; rp.z = mp.z;
+                rp.r = r; rp.g = g; rp.b = b;
+                display_cloud->push_back(rp);
+            }
+        } else if (color_mode == "height") {
+            // Find Z range then map to rainbow
+            float zmin = 1e9, zmax = -1e9;
+            for (const auto &mp : map_points) {
+                if (mp.z < zmin) zmin = mp.z;
+                if (mp.z > zmax) zmax = mp.z;
+            }
+            float zrange = zmax - zmin;
+            if (zrange < 0.01f) zrange = 1.0f;
+            for (const auto &mp : map_points) {
+                float t = (mp.z - zmin) / zrange; // 0 = low, 1 = high
+                float hue = (1.0f - t) * 240.0f;  // blue (low) → red (high)
                 uint8_t r, g, b;
                 hsv2rgb(hue, 1.0f, 1.0f, r, g, b);
                 pcl::PointXYZRGB rp;
