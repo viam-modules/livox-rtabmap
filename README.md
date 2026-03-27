@@ -74,6 +74,8 @@ These control how consecutive lidar scans are aligned to estimate frame-to-frame
 
 | Parameter | Type | Default | Unit | Description |
 |-----------|------|---------|------|-------------|
+| `odom_strategy` | int | `0` | — | 0=Frame-to-Map (matches each scan against a local map of recent scans, more robust against ghost maps), 1=Frame-to-Frame (matches consecutive scans only, faster but more drift-prone) |
+| `filtering_strategy` | int | `1` | — | Odometry smoothing filter. 0=none, 1=Kalman filter (smooths jumps), 2=particle filter |
 | `point_to_plane` | bool | `true` | — | Use point-to-plane ICP (more accurate for flat surfaces) vs point-to-point |
 | `voxel_size` | float | `0.03` | meters | Downsample input scans to this voxel size before ICP alignment. Smaller = more precise but slower. 0.03 = 30mm |
 | `max_correspondence_distance` | float | `0.25` | meters | Maximum distance between two points to be considered a correspondence pair. Too large = wrong matches. Too small = not enough matches. 0.25 = 250mm |

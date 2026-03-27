@@ -30,8 +30,14 @@ bool SlamPipeline::init(const json &config) {
     json rtab = config.value("rtabmap", json::object());
 
     rtabmap::ParametersMap params;
-    params.insert({rtabmap::Parameters::kOdomStrategy(), "1"});
+    // 0=Frame-to-Map (more robust, resists ghosts), 1=Frame-to-Frame
+    params.insert({rtabmap::Parameters::kOdomStrategy(),
+        std::to_string(icp.value("odom_strategy", 0))});
     params.insert({rtabmap::Parameters::kRegStrategy(), "1"});
+    // Kalman filter smooths odometry (0=none, 1=Kalman, 2=Particle)
+    params.insert({rtabmap::Parameters::kOdomFilteringStrategy(),
+        std::to_string(icp.value("filtering_strategy", 1))});
+    params.insert({rtabmap::Parameters::kOdomGuessMotion(), "true"});
 
     // ICP parameters from config
     params.insert({rtabmap::Parameters::kIcpPointToPlane(),

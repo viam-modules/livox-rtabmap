@@ -18,6 +18,8 @@
   "camera_distance": 10.0,
   "show_trajectory": true,
   "icp": {
+    "odom_strategy": 0,
+    "filtering_strategy": 1,
     "point_to_plane": true,
     "voxel_size": 0.03,
     "max_correspondence_distance": 0.25,
