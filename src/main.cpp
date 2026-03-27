@@ -1,6 +1,7 @@
 #include <atomic>
 #include <csignal>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <mutex>
@@ -128,6 +129,34 @@ int main(int argc, char *argv[]) {
         std::cerr << "Failed to start Livox receiver\n";
         return 1;
     }
+
+    // Config live reload — check every 2 seconds
+    auto last_config_write = std::filesystem::last_write_time(config_path);
+    QTimer config_timer;
+    QObject::connect(&config_timer, &QTimer::timeout, [&]() {
+        try {
+            auto now = std::filesystem::last_write_time(config_path);
+            if (now == last_config_write) return;
+            last_config_write = now;
+
+            std::ifstream rf(config_path);
+            if (!rf) return;
+            json new_config = json::parse(rf);
+
+            map_voxel = new_config.value("map_voxel_size", map_voxel);
+            downsample_interval = new_config.value("map_downsample_interval", downsample_interval);
+            color_mode = new_config.value("color_mode", color_mode);
+            auto mc = new_config.value("map_color", std::vector<int>{map_color.red(), map_color.green(), map_color.blue()});
+            auto sc = new_config.value("scan_color", std::vector<int>{scan_color.red(), scan_color.green(), scan_color.blue()});
+            map_color = QColor(mc[0], mc[1], mc[2]);
+            scan_color = QColor(sc[0], sc[1], sc[2]);
+
+            std::cout << "[CONFIG] Reloaded " << config_path << "\n";
+        } catch (const std::exception &e) {
+            std::cerr << "[CONFIG] Reload error: " << e.what() << "\n";
+        }
+    });
+    config_timer.start(2000);
 
     QTimer update_timer;
     QObject::connect(&update_timer, &QTimer::timeout, [&]() {
