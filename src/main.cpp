@@ -318,11 +318,12 @@ int main(int argc, char *argv[]) {
                 tp.x = trajectory_xz[i].first;
                 tp.y = trajectory_xz[i].second;
                 tp.z = 0;  // project onto ground plane
-                tp.r = 255; tp.g = 255; tp.b = 0; // yellow trajectory
+                tp.r = 255; tp.g = 50; tp.b = 255; // magenta trajectory
                 traj_cloud->push_back(tp);
             }
             traj_cloud->width = traj_cloud->size(); traj_cloud->height = 1;
             viewer.addCloud("trajectory", traj_cloud);
+            viewer.setCloudPointSize("trajectory", 6);
         }
 
         latest_cloud.reset();
