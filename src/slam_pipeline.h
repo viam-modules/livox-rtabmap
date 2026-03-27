@@ -45,5 +45,6 @@ private:
     int frame_count_ = 0;
     std::string db_path_;
     bool use_imu_ = false;
+    float max_range_ = 0;
     rtabmap::IMU last_imu_;
 };

@@ -65,6 +65,7 @@ bool SlamPipeline::init(const json &config) {
     }
 
     use_imu_ = config.value("use_imu_prior", false);
+    max_range_ = config.value("max_range", 0.0f);
     db_path_ = config.value("database_path", "livox_slam.db");
 
     rtabmap_ = std::make_unique<rtabmap::Rtabmap>();
@@ -83,7 +84,9 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr xyz(new pcl::PointCloud<pcl::PointXYZ>);
     xyz->reserve(cloud->size());
+    float max_r2 = max_range_ * max_range_;
     for (const auto &p : *cloud) {
+        if (max_range_ > 0 && (p.x*p.x + p.y*p.y + p.z*p.z) > max_r2) continue;
         xyz->push_back(pcl::PointXYZ(p.x, p.y, p.z));
     }
 
