@@ -62,7 +62,6 @@ private:
     float accel_holdoff_ = 1.0; // seconds
     std::atomic<float> current_accel_{0};
     std::atomic<double> last_high_accel_time_{0};
-    rtabmap::IMU last_imu_;
 
     // Viam playback IMU path (processImu — called from PcdPlayer)
     // Each Viam reading carries one measurement type at a time.

@@ -167,10 +167,6 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
     rtabmap::LaserScan scan = rtabmap::util3d::laserScanFromPointCloud(*xyz);
     rtabmap::SensorData data(scan, cv::Mat(), cv::Mat(), rtabmap::CameraModel(), 0, stamp);
 
-    if (use_imu_) {
-        data.setIMU(last_imu_);
-    }
-
     rtabmap::OdometryInfo odom_info;
     rtabmap::Transform pose = odom_->process(data, &odom_info);
 
@@ -200,8 +196,20 @@ void SlamPipeline::processImu(const ImuReading &imu) {
     if (imu.has_accel)       { last_accel_       = {imu.ax, imu.ay, imu.az}; has_accel_       = true; }
     if (imu.has_orientation) { last_orientation_ = {imu.qx, imu.qy, imu.qz, imu.qw}; has_orientation_ = true; }
 
-    // Need at least gyro or accel to be useful
-    if (!has_gyro_ && !has_accel_) return;
+    // Update accel deviation for scan rejection (same logic as processIMU)
+    if (imu.has_accel) {
+        const double g = 9.80665;
+        double mag = std::sqrt(imu.ax*imu.ax + imu.ay*imu.ay + imu.az*imu.az);
+        float accel_dev = static_cast<float>(std::abs(mag - g));
+        current_accel_.store(accel_dev);
+        if (max_accel_ > 0 && accel_dev > max_accel_) {
+            double stamp = static_cast<double>(imu.timestamp_ns) / 1e9;
+            last_high_accel_time_.store(stamp);
+        }
+    }
+
+    // Need at least gyro or accel to be useful for odometry pre-integration
+    if (!use_imu_ || (!has_gyro_ && !has_accel_)) return;
 
     cv::Mat cov3 = cv::Mat::eye(3, 3, CV_64FC1) * 1e-3;
     cv::Mat cov3_large = cv::Mat::eye(3, 3, CV_64FC1) * 9999.0;
@@ -236,32 +244,14 @@ int SlamPipeline::getMapSize() const {
 void SlamPipeline::processIMU(float gyro_x, float gyro_y, float gyro_z,
                               float acc_x, float acc_y, float acc_z,
                               uint64_t timestamp_ns) {
-    if (!use_imu_) return;
-
     const double g = 9.80665;
-    cv::Vec3d angVel(gyro_x, gyro_y, gyro_z);           // rad/s
-    cv::Vec3d linAcc(acc_x * g, acc_y * g, acc_z * g);  // m/s²
-
-    // Store magnitude of acceleration minus gravity for scan rejection
-    float accel_mag = std::sqrt(linAcc[0]*linAcc[0] + linAcc[1]*linAcc[1] + linAcc[2]*linAcc[2]);
-    float accel_dev = std::abs(accel_mag - (float)g);
-    current_accel_.store(accel_dev);
-
-    // Record time of high acceleration for holdoff
-    if (max_accel_ > 0 && accel_dev > max_accel_) {
-        double stamp = static_cast<double>(timestamp_ns) / 1e9;
-        last_high_accel_time_.store(stamp);
-    }
-
-    // Let rtabmap handle IMU orientation estimation internally
-    last_imu_ = rtabmap::IMU(
-        cv::Vec4d(0, 0, 0, 0),  // orientation unknown (let rtabmap estimate)
-        cv::Mat(),               // no orientation covariance
-        angVel,
-        cv::Mat(),               // no angular velocity covariance
-        linAcc,
-        cv::Mat()                // no linear acceleration covariance
-    );
+    ImuReading imu;
+    imu.timestamp_ns = timestamp_ns;
+    imu.has_gyro  = true;
+    imu.gx = gyro_x; imu.gy = gyro_y; imu.gz = gyro_z; // rad/s
+    imu.has_accel = true;
+    imu.ax = acc_x * g; imu.ay = acc_y * g; imu.az = acc_z * g; // g → m/s²
+    processImu(imu);
 }
 
 pcl::PointCloud<pcl::PointXYZI>::Ptr SlamPipeline::rebuildMap() const {
