@@ -266,23 +266,27 @@ func downloadTabularData(ctx context.Context, dc *app.DataClient, filter *app.Fi
 		}
 
 		for _, d := range resp.TabularData {
-			var component string
+			var component, method string
 			var tags []string
 			if d.Metadata != nil {
 				component = d.Metadata.ComponentName
+				method = d.Metadata.MethodName
 				tags = d.Metadata.Tags
 			}
 			if component == "" {
 				component = "imu"
 			}
 
-			filename := fmt.Sprintf("%d_%s.json", d.TimeRequested.UnixNano(), component)
+			// Include method in filename to avoid collisions when multiple
+			// measurement types share the same millisecond timestamp.
+			filename := fmt.Sprintf("%d_%s_%s.json", d.TimeRequested.UnixNano(), component, method)
 			dest := filepath.Join(outDir, filename)
 
 			raw, err := json.Marshal(map[string]interface{}{
 				"time_requested": d.TimeRequested,
 				"time_received":  d.TimeReceived,
 				"component":      component,
+				"method":         method,
 				"data":           d.Data,
 			})
 			if err != nil {

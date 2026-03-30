@@ -25,6 +25,7 @@ add_executable(livox_rtabmap
     src/livox_receiver.cpp
     src/slam_pipeline.cpp
     src/pcd_player.cpp
+    src/imu_reader.cpp
 )
 
 target_include_directories(livox_rtabmap PRIVATE

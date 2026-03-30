@@ -52,6 +52,7 @@ int main(int argc, char *argv[]) {
     std::string sensor_ip = config.value("sensor_ip", "192.168.1.196");
     std::string host_ip = config.value("host_ip", "192.168.1.10");
     std::string playback_dir = config.value("playback_dir", "");
+    std::string imu_dir = config.value("imu_dir", "");
     int playback_delay_ms = config.value("playback_delay_ms", 0);
     bool headless = config.value("headless", false);
     float map_voxel = config.value("map_voxel_size", 0.03f);
@@ -88,12 +89,20 @@ int main(int argc, char *argv[]) {
             std::cerr << "Failed to load PCD files from: " << playback_dir << "\n";
             return 1;
         }
+        if (!imu_dir.empty()) {
+            player.loadImu(imu_dir); // non-fatal if missing
+        }
+
+        auto imuCb = [&slam](const ImuReading &imu) {
+            slam.processImu(imu);
+        };
 
         if (headless) {
             player.play(
                 [&slam](pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t ts) {
                     slam.processCloud(cloud, ts);
                 },
+                imuCb,
                 playback_delay_ms);
 
             std::cout << "\nPlayback done: " << slam.getFrameCount() << " frames processed\n"
@@ -131,6 +140,7 @@ int main(int argc, char *argv[]) {
                         frame_count++;
                     }
                 },
+                imuCb,
                 playback_delay_ms);
             playback_done = true;
         });

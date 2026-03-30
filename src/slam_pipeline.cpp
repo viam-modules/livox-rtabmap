@@ -13,6 +13,8 @@
 
 #include <opencv2/core.hpp>
 
+#include "imu_reader.h"
+
 using json = nlohmann::json;
 
 SlamPipeline::SlamPipeline() {}
@@ -115,6 +117,36 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
     }
 
     return true;
+}
+
+void SlamPipeline::processImu(const ImuReading &imu) {
+    if (!odom_) return;
+
+    // Update last-known state — each Viam reading carries one measurement type
+    if (imu.has_gyro)        { last_gyro_        = {imu.gx, imu.gy, imu.gz}; has_gyro_        = true; }
+    if (imu.has_accel)       { last_accel_       = {imu.ax, imu.ay, imu.az}; has_accel_       = true; }
+    if (imu.has_orientation) { last_orientation_ = {imu.qx, imu.qy, imu.qz, imu.qw}; has_orientation_ = true; }
+
+    // Need at least gyro or accel to be useful
+    if (!has_gyro_ && !has_accel_) return;
+
+    cv::Mat cov3 = cv::Mat::eye(3, 3, CV_64FC1) * 1e-3;
+    cv::Mat cov3_large = cv::Mat::eye(3, 3, CV_64FC1) * 9999.0;
+
+    rtabmap::IMU rtImu(
+        last_orientation_,
+        has_orientation_ ? cov3 : cov3_large,
+        last_gyro_,
+        has_gyro_ ? cov3 : cov3_large,
+        last_accel_,
+        has_accel_ ? cov3 : cov3_large
+    );
+
+    double stamp = static_cast<double>(imu.timestamp_ns) / 1e9;
+    rtabmap::SensorData data;
+    data.setStamp(stamp);
+    data.setIMU(rtImu);
+    odom_->process(data, nullptr);
 }
 
 rtabmap::Transform SlamPipeline::getPose() const {

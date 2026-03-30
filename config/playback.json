@@ -1,5 +1,6 @@
 {
   "playback_dir": "data/pcd",
+  "imu_dir": "data/imu",
   "playback_delay_ms": 0,
   "headless": false,
   "database_path": "",
