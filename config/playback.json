@@ -1,0 +1,27 @@
+{
+  "playback_dir": "data/pcd",
+  "playback_delay_ms": 0,
+  "headless": false,
+  "database_path": "",
+  "map_voxel_size": 0.1,
+  "map_downsample_interval": 50,
+  "color_mode": "intensity",
+  "map_color": [180, 180, 180],
+  "scan_color": [0, 255, 0],
+  "camera_distance": 10.0,
+   "icp": {                                                                      
+      "point_to_plane": false,                              
+      "voxel_size": 0.1,                                                        
+      "max_correspondence_distance": 1.0,
+      "iterations": 20,                                                         
+      "epsilon": 0.001,                                     
+      "max_translation": 2.0,                                                   
+      "max_rotation": 1.0
+  },
+  "rtabmap": {
+    "detection_rate": 0,
+    "proximity_by_space": true,
+    "linear_update": 0.1,
+    "angular_update": 0.1
+  }
+}

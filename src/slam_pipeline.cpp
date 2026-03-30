@@ -1,5 +1,7 @@
 #include "slam_pipeline.h"
 
+#include <chrono>
+#include <ctime>
 #include <iostream>
 
 #include <rtabmap/core/Parameters.h>
@@ -61,7 +63,14 @@ bool SlamPipeline::init(const json &config) {
         return false;
     }
 
-    db_path_ = config.value("database_path", "livox_slam.db");
+    db_path_ = config.value("database_path", "");
+    if (db_path_.empty()) {
+        auto now = std::chrono::system_clock::now();
+        auto t = std::chrono::system_clock::to_time_t(now);
+        char buf[32];
+        std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", std::localtime(&t));
+        db_path_ = std::string("slam_") + buf + ".db";
+    }
 
     rtabmap_ = std::make_unique<rtabmap::Rtabmap>();
     rtabmap_->init(params, db_path_);

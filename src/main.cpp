@@ -21,6 +21,7 @@
 #include <nlohmann/json.hpp>
 
 #include "livox_receiver.h"
+#include "pcd_player.h"
 #include "slam_pipeline.h"
 
 using json = nlohmann::json;
@@ -50,6 +51,8 @@ int main(int argc, char *argv[]) {
 
     std::string sensor_ip = config.value("sensor_ip", "192.168.1.196");
     std::string host_ip = config.value("host_ip", "192.168.1.10");
+    std::string playback_dir = config.value("playback_dir", "");
+    int playback_delay_ms = config.value("playback_delay_ms", 0);
     bool headless = config.value("headless", false);
     float map_voxel = config.value("map_voxel_size", 0.03f);
     int downsample_interval = config.value("map_downsample_interval", 50);
@@ -61,10 +64,15 @@ int main(int argc, char *argv[]) {
     QColor scan_color(scan_color_arr[0], scan_color_arr[1], scan_color_arr[2]);
 
     std::cout << "Livox → RTAB-Map SLAM\n"
-              << "  Config: " << config_path << "\n"
-              << "  Sensor: " << sensor_ip << "\n"
-              << "  Host:   " << host_ip << "\n"
-              << "  Mode:   " << (headless ? "headless" : "GUI") << "\n\n";
+              << "  Config: " << config_path << "\n";
+    if (!playback_dir.empty()) {
+        std::cout << "  Mode:   playback from " << playback_dir << "\n";
+    } else {
+        std::cout << "  Sensor: " << sensor_ip << "\n"
+                  << "  Host:   " << host_ip << "\n"
+                  << "  Mode:   " << (headless ? "headless" : "GUI") << "\n";
+    }
+    std::cout << "\n";
 
     // Init SLAM pipeline
     SlamPipeline slam;
@@ -73,6 +81,112 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    // Playback mode: replay downloaded PCD files through the SLAM pipeline
+    if (!playback_dir.empty()) {
+        PcdPlayer player;
+        if (!player.load(playback_dir)) {
+            std::cerr << "Failed to load PCD files from: " << playback_dir << "\n";
+            return 1;
+        }
+
+        if (headless) {
+            player.play(
+                [&slam](pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t ts) {
+                    slam.processCloud(cloud, ts);
+                },
+                playback_delay_ms);
+
+            std::cout << "\nPlayback done: " << slam.getFrameCount() << " frames processed\n"
+                      << "Database saved to: " << slam.getDatabasePath() << "\n";
+            return 0;
+        }
+
+        // GUI playback — spin up Qt viewer, play in background thread
+        QApplication app(argc, argv);
+
+        rtabmap::CloudViewer viewer;
+        viewer.setWindowTitle("Livox SLAM (playback)");
+        viewer.setBackgroundColor(QColor(20, 20, 20));
+        viewer.setGridShown(true);
+        viewer.resize(1280, 720);
+        float cam_dist = config.value("camera_distance", 10.0f);
+        float d = cam_dist / 1.732f;
+        viewer.setCameraPosition(d, d, d, 0, 0, 0, 0, 0, 1);
+        viewer.show();
+
+        std::mutex cloud_mu;
+        pcl::PointCloud<pcl::PointXYZI>::Ptr latest_cloud;
+        rtabmap::Transform latest_pose;
+        pcl::PointCloud<pcl::PointXYZI>::Ptr accumulated_map(new pcl::PointCloud<pcl::PointXYZI>);
+        int frame_count = 0;
+        bool playback_done = false;
+
+        std::thread play_thread([&]() {
+            player.play(
+                [&](pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t ts) {
+                    if (slam.processCloud(cloud, ts)) {
+                        std::lock_guard<std::mutex> lock(cloud_mu);
+                        latest_cloud = cloud;
+                        latest_pose = slam.getPose();
+                        frame_count++;
+                    }
+                },
+                playback_delay_ms);
+            playback_done = true;
+        });
+
+        QTimer update_timer;
+        QObject::connect(&update_timer, &QTimer::timeout, [&]() {
+            if (!running) {
+                app.quit();
+                return;
+            }
+            if (playback_done && !latest_cloud) return;
+            std::lock_guard<std::mutex> lock(cloud_mu);
+            if (!latest_cloud) return;
+
+            for (const auto &p : *latest_cloud) {
+                pcl::PointXYZI tp;
+                float x = p.x, y = p.y, z = p.z;
+                const float *data = latest_pose.data();
+                tp.x = data[0]*x + data[1]*y + data[2]*z + data[3];
+                tp.y = data[4]*x + data[5]*y + data[6]*z + data[7];
+                tp.z = data[8]*x + data[9]*y + data[10]*z + data[11];
+                tp.intensity = p.intensity;
+                accumulated_map->push_back(tp);
+            }
+            accumulated_map->width = accumulated_map->size();
+            accumulated_map->height = 1;
+
+            if (frame_count % downsample_interval == 0 && accumulated_map->size() > 100000) {
+                pcl::VoxelGrid<pcl::PointXYZI> voxel;
+                voxel.setInputCloud(accumulated_map);
+                voxel.setLeafSize(map_voxel, map_voxel, map_voxel);
+                pcl::PointCloud<pcl::PointXYZI>::Ptr filtered(new pcl::PointCloud<pcl::PointXYZI>);
+                voxel.filter(*filtered);
+                accumulated_map = filtered;
+            }
+
+            viewer.addCloud("map", accumulated_map);
+            viewer.addCloud("scan", latest_cloud, latest_pose);
+            latest_cloud.reset();
+            viewer.setWindowTitle(QString("Livox SLAM (playback) | Frame %1 / %2 | Map: %3 pts")
+                .arg(frame_count).arg(player.frameCount()).arg(accumulated_map->size()));
+            viewer.refreshView();
+        });
+        update_timer.start(33);
+
+        int ret = app.exec();
+        running = false;
+        player.stop();
+        play_thread.join();
+
+        std::cout << "\nPlayback done: " << slam.getFrameCount() << " frames processed\n"
+                  << "Database saved to: " << slam.getDatabasePath() << "\n";
+        return ret;
+    }
+
+    // Live mode — headless
     if (headless) {
         LivoxReceiver receiver(sensor_ip, host_ip);
         bool ok = receiver.start(

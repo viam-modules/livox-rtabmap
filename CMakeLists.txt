@@ -7,12 +7,13 @@ set(CMAKE_AUTOMOC ON)
 
 # Find dependencies
 find_package(RTABMap REQUIRED)
-find_package(PCL REQUIRED COMPONENTS common io filters)
+find_package(PCL REQUIRED COMPONENTS common io filters kdtree)
 find_package(Qt5 REQUIRED COMPONENTS Widgets)
 find_package(nlohmann_json REQUIRED)
 
 # Build Livox-SDK2 static library
-# Patch: disable -Werror and add -include cstdint for GCC 13+
+# Patch: disable -Werror, add -include cstdint for GCC 13+, and allow old cmake_minimum_required
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 set(LIVOX_SDK_DIR ${CMAKE_SOURCE_DIR}/third_party/Livox-SDK2)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error -include cstdint")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-error")
@@ -23,6 +24,7 @@ add_executable(livox_rtabmap
     src/main.cpp
     src/livox_receiver.cpp
     src/slam_pipeline.cpp
+    src/pcd_player.cpp
 )
 
 target_include_directories(livox_rtabmap PRIVATE
