@@ -129,3 +129,8 @@ if (!pose.isNull()) {
 - `OdomICP/MaxCorrespondenceDistance`: 0.5 (500mm)
 - `Rtabmap/DetectionRate`: 1.0 (process every frame)
 - `RGBD/ProximityBySpace`: true (spatial proximity for loop closure)
+
+## TODO
+
+### Residual color mode
+Add a `"residual"` color_mode that colors each point by its distance to the nearest neighbor in the previous frame's cloud. Green = well-matched (low residual), red = poorly matched (high residual). This would show exactly where ICP alignment is failing. Requires building a KD-tree of the reference cloud each frame and querying each new point against it — expensive (~20k queries × ~200k reference points), so probably needs to be opt-in and might need to run on a downsampled version. Could use `pcl::KdTreeFLANN` for the lookup.
