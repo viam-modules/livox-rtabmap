@@ -14,6 +14,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "imu_reader.h"
+
 class SlamPipeline {
 public:
     SlamPipeline();
@@ -32,6 +34,10 @@ public:
                     float acc_x, float acc_y, float acc_z,
                     uint64_t timestamp_ns);
 
+    // Feed an IMU reading to the odometry as a motion prior.
+    // Should be called before the next processCloud call.
+    void processImu(const ImuReading &imu);
+
     // Get the current pose
     rtabmap::Transform getPose() const;
 
@@ -47,12 +53,22 @@ private:
     rtabmap::Transform current_pose_;
     int frame_count_ = 0;
     std::string db_path_;
+
+    // Live Livox IMU path (processIMU — called at 200Hz from LivoxReceiver)
     bool use_imu_ = false;
     float min_range_ = 0;
     float max_range_ = 0;
     float max_accel_ = 0; // m/s², 0 = disabled
     float accel_holdoff_ = 1.0; // seconds
     std::atomic<float> current_accel_{0};
-    std::atomic<double> last_high_accel_time_{0}; // timestamp of last high-accel IMU reading
-    rtabmap::IMU last_imu_;
+    std::atomic<double> last_high_accel_time_{0};
+
+    // Viam playback IMU path (processImu — called from PcdPlayer)
+    // Each Viam reading carries one measurement type at a time.
+    cv::Vec3d last_gyro_{0, 0, 0};
+    cv::Vec3d last_accel_{0, 0, 9.81};
+    cv::Vec4d last_orientation_{0, 0, 0, 1}; // identity quaternion
+    bool has_gyro_ = false;
+    bool has_accel_ = false;
+    bool has_orientation_ = false;
 };
