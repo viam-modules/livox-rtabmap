@@ -118,6 +118,15 @@ bool SlamPipeline::init(const json &config) {
     rtabmap_ = std::make_unique<rtabmap::Rtabmap>();
     rtabmap_->init(params, db_path_);
 
+    // Occupancy grid maker — 2D projection with ray tracing for free space
+    rtabmap::ParametersMap grid_params;
+    grid_params.insert({rtabmap::Parameters::kGridCellSize(),
+        std::to_string(config.value("grid_resolution", 0.05f))});
+    grid_params.insert({rtabmap::Parameters::kGridRayTracing(), "true"});
+    grid_params.insert({rtabmap::Parameters::kGrid3D(), "false"});
+    grid_maker_.parseParameters(grid_params);
+    occ_grid_ = std::make_unique<rtabmap::OccupancyGrid>(&grid_cache_, grid_params);
+
     std::cout << "[SLAM] Pipeline initialized\n"
               << "  Database: " << db_path_ << "\n"
               << "  ICP: voxel=" << icp.value("voxel_size", 0.03)
@@ -128,6 +137,7 @@ bool SlamPipeline::init(const json &config) {
 
 bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t timestamp_ns,
                                 pcl::PointCloud<pcl::PointXYZI>::Ptr *filtered_cloud) {
+    std::lock_guard<std::mutex> lock(slam_mutex_);
     if (!odom_ || !rtabmap_) return false;
 
     if (max_accel_ > 0) {
@@ -180,6 +190,17 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
 
     rtabmap_->process(data, pose);
 
+    // Add local occupancy grid for this node if a new node was created
+    int nodeId = rtabmap_->getLastLocationId();
+    if (nodeId > 0 && nodeId != last_grid_node_id_) {
+        last_grid_node_id_ = nodeId;
+        cv::Mat ground, obstacles, empty;
+        cv::Point3f viewPoint(0, 0, 0);
+        grid_maker_.createLocalMap(scan, pose, ground, obstacles, empty, viewPoint);
+        grid_cache_.add(nodeId, ground, obstacles, empty,
+                        grid_maker_.getCellSize(), viewPoint);
+    }
+
     if (frame_count_ % 10 == 0) {
         std::cout << "[SLAM] Frame " << frame_count_
                   << " | pose: " << pose.prettyPrint() << "\n";
@@ -189,6 +210,7 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
 }
 
 void SlamPipeline::processImu(const ImuReading &imu) {
+    std::lock_guard<std::mutex> lock(slam_mutex_);
     if (!odom_) return;
 
     // Update last-known state — each Viam reading carries one measurement type
@@ -254,7 +276,21 @@ void SlamPipeline::processIMU(float gyro_x, float gyro_y, float gyro_z,
     processImu(imu);
 }
 
-pcl::PointCloud<pcl::PointXYZI>::Ptr SlamPipeline::rebuildMap() const {
+cv::Mat SlamPipeline::getOccupancyGrid(float &xMin, float &yMin, float &cellSize) {
+    std::lock_guard<std::mutex> lock(slam_mutex_);
+    if (!rtabmap_ || !occ_grid_) return cv::Mat();
+
+    std::map<int, rtabmap::Transform> poses;
+    std::multimap<int, rtabmap::Link> constraints;
+    rtabmap_->getGraph(poses, constraints, /*optimized=*/true, /*global=*/true);
+
+    occ_grid_->update(poses);
+
+    cellSize = occ_grid_->getCellSize();
+    return occ_grid_->getMap(xMin, yMin);
+}
+
+pcl::PointCloud<pcl::PointXYZI>::Ptr SlamPipeline::rebuildMap(int map_id) const {
     auto map = pcl::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
     if (!rtabmap_) return map;
 
@@ -263,12 +299,12 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr SlamPipeline::rebuildMap() const {
     std::multimap<int, rtabmap::Link> constraints;
     rtabmap_->get3DMap(signatures, poses, constraints, true, true);
 
-    std::cout << "[SLAM] Rebuilding map from " << poses.size() << " nodes\n";
-
+    int included = 0;
     for (auto &[id, pose] : poses) {
         if (pose.isNull()) continue;
         auto it = signatures.find(id);
         if (it == signatures.end()) continue;
+        if (map_id >= 0 && it->second.mapId() != map_id) continue;
 
         rtabmap::LaserScan scan = it->second.sensorData().laserScanRaw();
         if (scan.isEmpty()) {
@@ -283,10 +319,43 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr SlamPipeline::rebuildMap() const {
             pi.intensity = 128;
             map->push_back(pi);
         }
+        included++;
     }
 
     map->width = map->size();
     map->height = 1;
-    std::cout << "[SLAM] Rebuilt map: " << map->size() << " points from " << poses.size() << " nodes\n";
+    std::cout << "[SLAM] Rebuilt map: " << map->size() << " points from "
+              << included << " nodes"
+              << (map_id >= 0 ? " (map " + std::to_string(map_id) + ")" : " (all sessions)")
+              << "\n";
     return map;
+}
+
+int SlamPipeline::largestMapId() const {
+    if (!rtabmap_) return -1;
+    std::map<int, rtabmap::Signature> signatures;
+    std::map<int, rtabmap::Transform> poses;
+    std::multimap<int, rtabmap::Link> constraints;
+    rtabmap_->get3DMap(signatures, poses, constraints, false, true);
+
+    std::map<int, int> counts;
+    for (const auto &[id, sig] : signatures) counts[sig.mapId()]++;
+
+    int best_id = -1, best_n = 0;
+    for (const auto &[mid, n] : counts) {
+        if (n > best_n) { best_n = n; best_id = mid; }
+    }
+    return best_id;
+}
+
+int SlamPipeline::lastMapId() const {
+    if (!rtabmap_) return -1;
+    std::map<int, rtabmap::Signature> signatures;
+    std::map<int, rtabmap::Transform> poses;
+    std::multimap<int, rtabmap::Link> constraints;
+    rtabmap_->get3DMap(signatures, poses, constraints, false, true);
+
+    int last = -1;
+    for (const auto &[id, sig] : signatures) last = std::max(last, sig.mapId());
+    return last;
 }

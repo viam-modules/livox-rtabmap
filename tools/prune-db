@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""Prune small sessions from an RTAB-Map SQLite database.
+
+Usage:
+  tools/prune-db path/to/map.db            # list sessions
+  tools/prune-db path/to/map.db --min N    # delete sessions with < N nodes
+"""
+
+import argparse
+import os
+import sqlite3
+import sys
+
+
+def list_sessions(conn):
+    return conn.execute(
+        "SELECT map_id, COUNT(*) FROM Node GROUP BY map_id ORDER BY 2 DESC"
+    ).fetchall()
+
+
+def prune(conn, map_ids):
+    ph = ",".join("?" * len(map_ids))
+    node_ids = [r[0] for r in conn.execute(
+        f"SELECT id FROM Node WHERE map_id IN ({ph})", map_ids
+    ).fetchall()]
+    if not node_ids:
+        return 0
+    nph = ",".join("?" * len(node_ids))
+    conn.execute(f"DELETE FROM Feature         WHERE node_id IN ({nph})", node_ids)
+    conn.execute(f"DELETE FROM GlobalDescriptor WHERE node_id IN ({nph})", node_ids)
+    conn.execute(f"DELETE FROM Statistics       WHERE id IN ({nph})", node_ids)
+    conn.execute(f"DELETE FROM Data             WHERE id IN ({nph})", node_ids)
+    conn.execute(f"DELETE FROM Link WHERE from_id IN ({nph}) OR to_id IN ({nph})",
+                 node_ids + node_ids)
+    conn.execute(f"DELETE FROM Node WHERE id IN ({nph})", node_ids)
+    return len(node_ids)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Prune small sessions from an RTAB-Map database")
+    ap.add_argument("db", help="Path to .db file")
+    ap.add_argument("--min", type=int, metavar="N",
+                    help="Delete sessions with fewer than N nodes")
+    ap.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
+    args = ap.parse_args()
+
+    if not os.path.exists(args.db):
+        sys.exit(f"File not found: {args.db}")
+
+    conn = sqlite3.connect(args.db)
+    sessions = list_sessions(conn)
+    total = sum(n for _, n in sessions)
+    size_mb = os.path.getsize(args.db) / 1024 / 1024
+
+    print(f"Database : {args.db}  ({size_mb:.0f} MB)")
+    print(f"Sessions : {len(sessions)}   Nodes: {total}\n")
+    print(f"  {'map_id':>6}  {'nodes':>6}")
+    print("  " + "-" * 15)
+    for map_id, n in sessions:
+        print(f"  {map_id:>6}  {n:>6}")
+
+    if args.min is None:
+        conn.close()
+        return
+
+    to_delete = [(m, n) for m, n in sessions if n < args.min]
+    if not to_delete:
+        print(f"\nNo sessions with fewer than {args.min} nodes.")
+        conn.close()
+        return
+
+    removed_nodes = sum(n for _, n in to_delete)
+    print(f"\nWill delete {len(to_delete)} session(s) ({removed_nodes} nodes):")
+    for m, n in to_delete:
+        print(f"  map {m}: {n} nodes")
+
+    if not args.yes:
+        try:
+            confirm = input("\nConfirm? [y/N] ")
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            conn.close()
+            return
+        if confirm.strip().lower() != "y":
+            print("Aborted.")
+            conn.close()
+            return
+
+    deleted = prune(conn, [m for m, _ in to_delete])
+    conn.commit()
+    print("Vacuuming...")
+    conn.isolation_level = None
+    conn.execute("VACUUM")
+    conn.close()
+
+    new_mb = os.path.getsize(args.db) / 1024 / 1024
+    print(f"Done. Deleted {deleted} nodes. {size_mb:.0f} MB → {new_mb:.0f} MB")
+
+
+if __name__ == "__main__":
+    main()

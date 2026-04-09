@@ -2,7 +2,10 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
+
+#include <opencv2/core.hpp>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -11,6 +14,9 @@
 #include <rtabmap/core/Odometry.h>
 #include <rtabmap/core/SensorData.h>
 #include <rtabmap/core/IMU.h>
+#include <rtabmap/core/LocalGrid.h>
+#include <rtabmap/core/LocalGridMaker.h>
+#include <rtabmap/core/global_map/OccupancyGrid.h>
 
 #include <nlohmann/json.hpp>
 
@@ -44,8 +50,18 @@ public:
     int getMapSize() const;
     int getFrameCount() const { return frame_count_; }
 
-    // Reconstruct accumulated map from database
-    pcl::PointCloud<pcl::PointXYZI>::Ptr rebuildMap() const;
+    // Reconstruct accumulated map from database.
+    // map_id = -1 loads all sessions; otherwise only that session.
+    pcl::PointCloud<pcl::PointXYZI>::Ptr rebuildMap(int map_id = -1) const;
+
+    // Return the map_id with the most nodes, or the highest map_id.
+    int largestMapId() const;
+    int lastMapId() const;
+
+    // Assemble the 2D occupancy grid from the current SLAM graph.
+    // Returns a CV_8SC1 mat: -1=unknown, 0=free, 100=occupied.
+    // xMin/yMin are the world-space origin of the grid in metres.
+    cv::Mat getOccupancyGrid(float &xMin, float &yMin, float &cellSize);
 
 private:
     std::unique_ptr<rtabmap::Odometry> odom_;
@@ -53,6 +69,14 @@ private:
     rtabmap::Transform current_pose_;
     int frame_count_ = 0;
     std::string db_path_;
+
+    mutable std::mutex slam_mutex_;
+
+    // Occupancy grid
+    rtabmap::LocalGridMaker grid_maker_;
+    rtabmap::LocalGridCache grid_cache_;
+    std::unique_ptr<rtabmap::OccupancyGrid> occ_grid_;
+    int last_grid_node_id_ = -1;
 
     // Live Livox IMU path (processIMU — called at 200Hz from LivoxReceiver)
     bool use_imu_ = false;
