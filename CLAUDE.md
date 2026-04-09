@@ -1,6 +1,6 @@
 # Livox Mid-360 → RTAB-Map Live SLAM
 
-Standalone C++ application that bridges Livox-SDK2 point clouds into RTAB-Map for live 3D SLAM with Qt visualization.
+Standalone C++ application that bridges Livox-SDK2 point clouds into RTAB-Map for live 3D SLAM with Qt visualization. No ROS dependency.
 
 ## Architecture
 
@@ -9,13 +9,19 @@ Livox-SDK2 callbacks (200k pts/sec UDP)
     ↓
 Frame accumulation (100ms → ~20k pts/frame at 10Hz)
     ↓
-rtabmap::SensorData (point cloud + timestamp)
+Range filtering (min_range / max_range)
     ↓
-rtabmap::OdometryICP (scan-to-scan or scan-to-map lidar odometry)
+Accel gating (reject scans during high acceleration + holdoff)
     ↓
-rtabmap::Rtabmap (graph SLAM, loop closure detection)
+rtabmap::SensorData (LaserScan + optional IMU)
     ↓
-rtabmap::CloudViewer / MainWindow (live Qt 3D visualization)
+rtabmap::Odometry (Frame-to-Map ICP with Kalman filter)
+    ↓
+rtabmap::Rtabmap (graph SLAM, loop closure)
+    ↓
+rtabmap::CloudViewer (live Qt 3D visualization)
+    ↓
+rtabmap database (.db file, persisted on exit)
 ```
 
 ## Project Structure
@@ -23,112 +29,111 @@ rtabmap::CloudViewer / MainWindow (live Qt 3D visualization)
 ```
 livox-rtab-map/
 ├── CLAUDE.md
-├── CMakeLists.txt          # build config, finds Livox-SDK2 + rtabmap + Qt + PCL
+├── README.md               # full parameter documentation
+├── CMakeLists.txt           # build config, finds Livox-SDK2 + rtabmap + Qt + PCL + nlohmann_json
 ├── src/
-│   ├── main.cpp            # entry point: init SDK, start rtabmap, run Qt event loop
-│   ├── livox_receiver.h    # Livox-SDK2 wrapper: callbacks, frame accumulation
+│   ├── main.cpp             # entry point: config loading, Qt viewer, frame accumulation + coloring
+│   ├── livox_receiver.h     # Livox-SDK2 wrapper: point cloud + IMU callbacks, frame accumulation
 │   ├── livox_receiver.cpp
-│   ├── slam_pipeline.h     # rtabmap wrapper: odometry + SLAM + map management
+│   ├── slam_pipeline.h      # rtabmap wrapper: odometry + SLAM + range filter + accel gating
 │   └── slam_pipeline.cpp
-└── config/
-    └── mid360_config.json  # Livox SDK2 network config (generated or static)
+├── config/
+│   └── default.json         # all parameters (IPs, ICP, rtabmap, display, filtering)
+└── third_party/
+    └── Livox-SDK2/           # git submodule
 ```
 
 ## Data Flow
 
 ### Livox Receiver (`livox_receiver.h/cpp`)
-- Inits Livox-SDK2 with JSON config (sensor IP, host IP, ports)
-- Registers point cloud callback
-- Accumulates points into frames using 100ms time window (same as Viam module)
+- Inits Livox-SDK2 with generated JSON config (sensor IP, host IP, ports, unicast)
+- Registers point cloud + IMU callbacks
+- Accumulates points into frames using 100ms time window
 - Converts `LivoxLidarCartesianHighRawPoint` (int32 mm) → PCL `PointXYZI` (float meters)
-- Signals new frame via callback to SLAM pipeline
+- Delivers IMU at 200Hz (gyro rad/s + accel in g) via separate callback
+- Signals new frame via FrameCallback to SLAM pipeline
 
 ### SLAM Pipeline (`slam_pipeline.h/cpp`)
-- Creates `rtabmap::OdometryICP` for scan matching
-  - Parameters: voxel size, max correspondence distance, ICP iterations
-- Creates `rtabmap::Rtabmap` for graph SLAM
-  - Parameters: memory management, loop closure threshold, map update rate
-- On each frame:
-  1. Wrap PCL cloud in `rtabmap::SensorData` with timestamp
-  2. Process through odometry → get pose estimate
-  3. Feed (SensorData, pose) into Rtabmap → map update + loop closure check
-- Exposes current map and trajectory for visualization
+- Loads all parameters from config JSON
+- Creates `rtabmap::Odometry` via factory (strategy 0=F2M or 1=F2F)
+- Creates `rtabmap::Rtabmap` with database persistence
+- Per frame:
+  1. Check accel gating (reject if above threshold or in holdoff period)
+  2. Filter points by min/max range
+  3. Convert to `rtabmap::LaserScan`
+  4. Attach IMU data if `use_imu_prior` is enabled
+  5. Process through odometry → get pose estimate
+  6. Feed (SensorData, pose) into Rtabmap → graph update + loop closure
+  7. Return filtered cloud + pose to viewer
+- Can rebuild accumulated map from database on startup (`load_previous_map`)
 
 ### Main (`main.cpp`)
-- Parse CLI args (sensor IP, host IP)
-- Init Livox receiver
-- Init SLAM pipeline
-- Create `rtabmap::CloudViewer` (lightweight) or `rtabmap::MainWindow` (full GUI)
-- Connect frame callback → SLAM pipeline → viewer update
-- Run Qt event loop
+- Loads JSON config (first CLI arg or `config/default.json`)
+- Headless mode: just runs SLAM pipeline with console output
+- GUI mode:
+  - Creates `rtabmap::CloudViewer` with configurable camera position
+  - Connects Livox receiver → SLAM pipeline → viewer
+  - Accumulates transformed points into map (respects `map_add_interval`)
+  - Voxel downsamples periodically (preserves intensity)
+  - Colors map via configurable mode (intensity/height/age/flat)
+  - Shows current scan overlay + trajectory
+  - Live-reloads display parameters from config every 2 seconds
+
+## Config System
+
+All parameters in `config/default.json`. See README.md for full documentation.
+
+**Live-reloadable** (no restart needed):
+- color_mode, map_color, scan_color
+- map_point_size, scan_point_size
+- map_voxel_size, map_downsample_interval, map_add_interval
+- show_trajectory
+
+**Requires restart**:
+- sensor_ip, host_ip, headless, database_path
+- All ICP parameters (odom_strategy, voxel_size, correspondence_distance, etc.)
+- All rtabmap parameters (detection_rate, linear_update, etc.)
+- min_range, max_range, max_accel, accel_holdoff, use_imu_prior
 
 ## Dependencies
 
-- **Livox-SDK2** — git submodule at `third_party/Livox-SDK2` (same as viam-livox-mid360)
-- **RTAB-Map** — system install (`sudo apt install librtabmap-dev` or build from source)
-- **PCL** — required by rtabmap (`sudo apt install libpcl-dev`)
-- **Qt5** — for rtabmap GUI (`sudo apt install qtbase5-dev`)
+- **Livox-SDK2** — git submodule at `third_party/Livox-SDK2`
+- **RTAB-Map** — build from source (not in Ubuntu 24.04 repos)
+- **PCL** — `sudo apt install libpcl-dev`
+- **Qt5** — `sudo apt install qtbase5-dev`
+- **nlohmann-json** — `sudo apt install nlohmann-json3-dev`
+- **OpenMPI** — `sudo apt install libopenmpi-dev` (needed by PCL/VTK)
 - **CMake 3.14+**
 
 ## Build
 
 ```bash
-# Install dependencies (Ubuntu 24.04)
-sudo apt install librtabmap-dev libpcl-dev qtbase5-dev cmake
-
-# Build
+git submodule update --init
 mkdir build && cd build
 cmake ..
 make -j$(nproc)
-
-# Run
-./livox_rtabmap --sensor-ip 192.168.1.196 --host-ip 192.168.1.10
 ```
 
-## Key rtabmap API Usage
+Note: Livox-SDK2 needs `-Wno-error -include cstdint` for GCC 13+. This is handled in CMakeLists.txt.
+
+## Key rtabmap API
 
 ```cpp
-// Create odometry
-rtabmap::OdometryICP odom;
-rtabmap::ParametersMap odomParams;
-odomParams.insert({rtabmap::Parameters::kOdomStrategy(), "1"}); // ICP
-odom.parseParameters(odomParams);
+// Odometry via factory (respects Odom/Strategy param)
+odom_.reset(rtabmap::Odometry::create(params));
 
-// Create SLAM
-rtabmap::Rtabmap rtabmap;
-rtabmap.init();
+// Create SensorData with laser scan (no images for LiDAR)
+rtabmap::LaserScan scan = rtabmap::util3d::laserScanFromPointCloud(*xyz);
+rtabmap::SensorData data(scan, cv::Mat(), cv::Mat(), rtabmap::CameraModel(), 0, stamp);
+data.setIMU(imu); // optional
 
-// Per frame:
-rtabmap::SensorData data(cloud, timestamp);
-rtabmap::OdometryInfo info;
-rtabmap::Transform pose = odom.process(data, &info);
-if (!pose.isNull()) {
-    rtabmap.process(data, pose);
-}
+// Process
+rtabmap::Transform pose = odom_->process(data, &odom_info);
+rtabmap_->process(data, pose);
+
+// Rebuild map from database
+rtabmap_->get3DMap(signatures, poses, constraints, true, true);
 ```
-
-## Configuration
-
-### Livox SDK2 (same as viam-livox-mid360)
-```json
-{
-  "MID360": {
-    "lidar_net_info": { ... },
-    "host_net_info": [{
-      "host_ip": "192.168.1.10",
-      "lidar_ip": ["192.168.1.196"],
-      ...
-    }]
-  }
-}
-```
-
-### RTAB-Map Parameters (tuned for Mid-360)
-- `Odom/Strategy`: 1 (ICP)
-- `OdomICP/VoxelSize`: 0.05 (50mm voxel downsampling)
-- `OdomICP/MaxCorrespondenceDistance`: 0.5 (500mm)
-- `Rtabmap/DetectionRate`: 1.0 (process every frame)
-- `RGBD/ProximityBySpace`: true (spatial proximity for loop closure)
 
 ## TODO
 

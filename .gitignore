@@ -1,4 +1,11 @@
+.DS_Store
 build/
 tools/fetch-data/.env
 tools/fetch-data/fetch-data
 data/
+build-mac/
+
+*.ply
+*.yaml
+*.db
+*.pgm

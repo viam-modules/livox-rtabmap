@@ -64,8 +64,13 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM, signalHandler);
 
     std::string config_path = "config/default.json";
-    if (argc > 1 && argv[1][0] != '-') {
-        config_path = argv[1];
+    bool cli_headless = false;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--headless") == 0) {
+            cli_headless = true;
+        } else if (argv[i][0] != '-') {
+            config_path = argv[i];
+        }
     }
 
     std::ifstream f(config_path);
@@ -80,7 +85,13 @@ int main(int argc, char *argv[]) {
     std::string playback_dir = config.value("playback_dir", "");
     std::string imu_dir = config.value("imu_dir", "");
     int playback_delay_ms = config.value("playback_delay_ms", 0);
-    bool headless = config.value("headless", false);
+    bool headless = cli_headless || config.value("headless", false);
+
+    // Auto-headless if no display available
+    if (!headless && !std::getenv("DISPLAY")) {
+        std::cout << "No DISPLAY set, running in headless mode\n";
+        headless = true;
+    }
     float map_voxel = config.value("map_voxel_size", 0.03f);
     int downsample_interval = config.value("map_downsample_interval", 50);
     std::string color_mode = config.value("color_mode", "intensity");
