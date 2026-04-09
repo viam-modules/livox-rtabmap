@@ -2,3 +2,4 @@ build/
 tools/fetch-data/.env
 tools/fetch-data/fetch-data
 data/
+build-mac/
