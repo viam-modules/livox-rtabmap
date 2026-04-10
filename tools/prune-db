@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Prune small sessions from an RTAB-Map SQLite database.
+"""Prune sessions from an RTAB-Map SQLite database.
 
 Usage:
-  tools/prune-db path/to/map.db            # list sessions
-  tools/prune-db path/to/map.db --min N    # delete sessions with < N nodes
+  tools/prune-db path/to/map.db              # list sessions
+  tools/prune-db path/to/map.db --min N      # delete sessions with < N nodes
+  tools/prune-db path/to/map.db --keep ID    # delete all sessions except ID
 """
 
 import argparse
@@ -41,6 +42,8 @@ def main():
     ap.add_argument("db", help="Path to .db file")
     ap.add_argument("--min", type=int, metavar="N",
                     help="Delete sessions with fewer than N nodes")
+    ap.add_argument("--keep", type=int, metavar="ID",
+                    help="Delete all sessions except this map_id")
     ap.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
     args = ap.parse_args()
 
@@ -59,11 +62,20 @@ def main():
     for map_id, n in sessions:
         print(f"  {map_id:>6}  {n:>6}")
 
-    if args.min is None:
+    if args.min is None and args.keep is None:
         conn.close()
         return
 
-    to_delete = [(m, n) for m, n in sessions if n < args.min]
+    if args.keep is not None and args.min is not None:
+        sys.exit("Error: --keep and --min are mutually exclusive")
+
+    if args.keep is not None:
+        keep_ids = {m for m, _ in sessions}
+        if args.keep not in keep_ids:
+            sys.exit(f"Error: map_id {args.keep} not found in database")
+        to_delete = [(m, n) for m, n in sessions if m != args.keep]
+    else:
+        to_delete = [(m, n) for m, n in sessions if n < args.min]
     if not to_delete:
         print(f"\nNo sessions with fewer than {args.min} nodes.")
         conn.close()

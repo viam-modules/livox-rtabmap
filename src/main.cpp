@@ -11,11 +11,20 @@
 #include <vector>
 
 #include <QApplication>
+#include <QGraphicsScene>
+#include <QGraphicsView>
+#include <QGraphicsPixmapItem>
+#include <QGraphicsEllipseItem>
+#include <QGraphicsTextItem>
+#include <QHBoxLayout>
 #include <QImage>
 #include <QLabel>
+#include <QMouseEvent>
 #include <QPixmap>
+#include <QPushButton>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QWheelEvent>
 #include <QWidget>
 
 #include <pcl/point_cloud.h>
@@ -29,6 +38,7 @@
 #include <nlohmann/json.hpp>
 
 #include "livox_receiver.h"
+#include "navigator.h"
 #include "pcd_player.h"
 #include "slam_pipeline.h"
 #ifdef HAVE_VIAM_SDK
@@ -149,8 +159,12 @@ int main(int argc, char *argv[]) {
                 imuCb,
                 playback_delay_ms);
 
-            std::cout << "\nPlayback done: " << slam.getFrameCount() << " frames processed\n"
-                      << "Database saved to: " << slam.getDatabasePath() << "\n";
+            std::cout << "\nPlayback done: " << slam.getFrameCount() << " frames processed\n";
+            if (config.value("post_process", json::object()).value("detect_loops", true) ||
+                config.value("post_process", json::object()).value("refine_links",  true)) {
+                slam.postProcess(config);
+            }
+            std::cout << "Database saved to: " << slam.getDatabasePath() << "\n";
             return 0;
         }
 
@@ -171,6 +185,7 @@ int main(int argc, char *argv[]) {
         pcl::PointCloud<pcl::PointXYZI>::Ptr latest_cloud;
         rtabmap::Transform latest_pose;
         pcl::PointCloud<pcl::PointXYZI>::Ptr accumulated_map(new pcl::PointCloud<pcl::PointXYZI>);
+        std::vector<std::pair<float,float>> trajectory_xz;
         int frame_count = 0;
         bool playback_done = false;
 
@@ -181,6 +196,7 @@ int main(int argc, char *argv[]) {
                         std::lock_guard<std::mutex> lock(cloud_mu);
                         latest_cloud = cloud;
                         latest_pose = slam.getPose();
+                        trajectory_xz.push_back({latest_pose.x(), latest_pose.y()});
                         frame_count++;
                     }
                 },
@@ -188,6 +204,82 @@ int main(int argc, char *argv[]) {
                 playback_delay_ms);
             playback_done = true;
         });
+
+        // Occupancy grid window
+        struct GridMeta { float xMin=0, yMin=0, cellSize=0.05f; int rows=0, cols=0; };
+        std::mutex grid_meta_mu;
+        GridMeta grid_meta;
+
+        QWidget grid_win;
+        grid_win.setWindowTitle("Occupancy Grid (playback)");
+        grid_win.resize(700, 700);
+        auto *pb_grid_vbox   = new QVBoxLayout(&grid_win);
+        pb_grid_vbox->setContentsMargins(4, 4, 4, 4);
+        auto *pb_scene       = new QGraphicsScene(&grid_win);
+        auto *pb_grid_view   = new QGraphicsView(pb_scene, &grid_win);
+        auto *pb_pmap_item   = pb_scene->addPixmap(QPixmap());
+        pb_grid_view->setDragMode(QGraphicsView::ScrollHandDrag);
+        pb_grid_view->setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
+        pb_grid_view->setRenderHint(QPainter::SmoothPixmapTransform);
+        pb_grid_view->setBackgroundBrush(QColor(80, 80, 80));
+        pb_grid_view->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        pb_grid_vbox->addWidget(pb_grid_view);
+
+        struct PbWheelFilter : QObject {
+            QGraphicsView *v;
+            PbWheelFilter(QGraphicsView *v, QObject *p) : QObject(p), v(v) {}
+            bool eventFilter(QObject *, QEvent *e) override {
+                if (e->type() == QEvent::Wheel) {
+                    double f = static_cast<QWheelEvent*>(e)->angleDelta().y() > 0 ? 1.15 : 1.0/1.15;
+                    v->scale(f, f);
+                    return true;
+                }
+                return false;
+            }
+        };
+        pb_grid_view->viewport()->installEventFilter(new PbWheelFilter(pb_grid_view, &grid_win));
+        grid_win.show();
+
+        QTimer pb_grid_timer;
+        QObject::connect(&pb_grid_timer, &QTimer::timeout, [&]() {
+            float xMin, yMin, cellSize;
+            cv::Mat grid = slam.getOccupancyGrid(xMin, yMin, cellSize);
+            if (grid.empty()) return;
+
+            QImage img(grid.cols, grid.rows, QImage::Format_RGB888);
+            for (int r = 0; r < grid.rows; r++) {
+                for (int c = 0; c < grid.cols; c++) {
+                    auto v = grid.at<int8_t>(r, c);
+                    QRgb px;
+                    if (v < 0)       px = qRgb(128, 128, 128);
+                    else if (v == 0) px = qRgb(240, 240, 240);
+                    else             px = qRgb(20,  20,  20);
+                    img.setPixel(c, grid.rows - 1 - r, px);
+                }
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(cloud_mu);
+                for (const auto &[tx, ty] : trajectory_xz) {
+                    int cx = (int)((tx - xMin) / cellSize);
+                    int cy = grid.rows - 1 - (int)((ty - yMin) / cellSize);
+                    if (cx >= 0 && cx < grid.cols && cy >= 0 && cy < grid.rows)
+                        img.setPixel(cx, cy, qRgb(255, 50, 255));
+                }
+                if (!trajectory_xz.empty()) {
+                    int cx = (int)((trajectory_xz.back().first  - xMin) / cellSize);
+                    int cy = grid.rows - 1 - (int)((trajectory_xz.back().second - yMin) / cellSize);
+                    for (int d = -3; d <= 3; d++) {
+                        if (cx+d >= 0 && cx+d < grid.cols) img.setPixel(cx+d, cy, qRgb(0, 255, 0));
+                        if (cy+d >= 0 && cy+d < grid.rows) img.setPixel(cx, cy+d, qRgb(0, 255, 0));
+                    }
+                }
+            }
+
+            pb_pmap_item->setPixmap(QPixmap::fromImage(img));
+            pb_scene->setSceneRect(img.rect());
+        });
+        pb_grid_timer.start(2000);
 
         QTimer update_timer;
         QObject::connect(&update_timer, &QTimer::timeout, [&]() {
@@ -235,8 +327,12 @@ int main(int argc, char *argv[]) {
         player.stop();
         play_thread.join();
 
-        std::cout << "\nPlayback done: " << slam.getFrameCount() << " frames processed\n"
-                  << "Database saved to: " << slam.getDatabasePath() << "\n";
+        std::cout << "\nPlayback done: " << slam.getFrameCount() << " frames processed\n";
+        if (config.value("post_process", json::object()).value("detect_loops", true) ||
+            config.value("post_process", json::object()).value("refine_links",  true)) {
+            slam.postProcess(config);
+        }
+        std::cout << "Database saved to: " << slam.getDatabasePath() << "\n";
         return ret;
     }
 
@@ -316,13 +412,31 @@ int main(int argc, char *argv[]) {
     int frame_count = 0;
     int max_frame_id = 0;
 
-    bool load_previous = config.value("load_previous_map", false);
-    bool load_largest  = config.value("load_largest_map", false);
-    if (load_previous || load_largest) {
-        int target_id = load_largest ? slam.largestMapId() : slam.lastMapId();
-        std::cout << "[VIEWER] Loading " << (load_largest ? "largest" : "last")
-                  << " map (id=" << target_id << ")\n";
-        auto rebuilt = slam.rebuildMap(target_id);
+    // load_map: null/absent = don't load, "largest", "last", or integer map_id
+    int load_map_id = -1;
+    std::string load_map_desc;
+    if (config.contains("load_map") && !config["load_map"].is_null()) {
+        auto &lm = config["load_map"];
+        if (lm.is_number_integer()) {
+            load_map_id = lm.get<int>();
+            load_map_desc = "map_id=" + std::to_string(load_map_id);
+        } else if (lm.is_string()) {
+            std::string s = lm.get<std::string>();
+            if (s == "largest") {
+                load_map_id = slam.largestMapId();
+                load_map_desc = "largest (id=" + std::to_string(load_map_id) + ")";
+            } else if (s == "last") {
+                load_map_id = slam.lastMapId();
+                load_map_desc = "last (id=" + std::to_string(load_map_id) + ")";
+            } else {
+                std::cerr << "[VIEWER] Unknown load_map value: " << s
+                          << " (expected null, \"largest\", \"last\", or integer)\n";
+            }
+        }
+    }
+    if (load_map_id >= 0) {
+        std::cout << "[VIEWER] Loading " << load_map_desc << "\n";
+        auto rebuilt = slam.loadMap(load_map_id);
         if (rebuilt->size() > 0) {
             std::cout << "[VIEWER] Loaded " << rebuilt->size() << " points\n";
             for (const auto &p : *rebuilt) {
@@ -378,18 +492,158 @@ int main(int argc, char *argv[]) {
     });
     config_timer.start(2000);
 
-    // Occupancy grid window
+    // ── Occupancy grid window ─────────────────────────────────────────────────
+    // Grid metadata — updated by the grid timer, read by the click handler.
+    struct GridMeta { float xMin=0, yMin=0, cellSize=0.05f; int rows=0, cols=0; };
+    std::mutex grid_meta_mu;
+    GridMeta grid_meta;
+
+    // Waypoints in world space (x, y metres).
+    std::vector<std::pair<float,float>> waypoints;
+
+    // Navigator
+    Navigator::Config nav_cfg;
+    Navigator navigator(nav_cfg);
+
     QWidget grid_win;
     grid_win.setWindowTitle("Occupancy Grid");
-    grid_win.resize(600, 600);
-    auto *grid_layout = new QVBoxLayout(&grid_win);
-    grid_layout->setContentsMargins(0, 0, 0, 0);
-    auto *grid_label = new QLabel(&grid_win);
-    grid_label->setAlignment(Qt::AlignCenter);
-    grid_label->setStyleSheet("background: #808080;");
-    grid_layout->addWidget(grid_label);
+    grid_win.resize(700, 750);
+    auto *grid_vbox = new QVBoxLayout(&grid_win);
+    grid_vbox->setContentsMargins(4, 4, 4, 4);
+    grid_vbox->setSpacing(4);
+
+    // Scene + view
+    auto *scene      = new QGraphicsScene(&grid_win);
+    auto *grid_view  = new QGraphicsView(scene, &grid_win);
+    auto *pmap_item  = scene->addPixmap(QPixmap());
+    // Waypoint items live on the scene; we rebuild them when the list changes.
+    std::vector<QGraphicsItem*> wp_items;
+
+    grid_view->setDragMode(QGraphicsView::ScrollHandDrag);
+    grid_view->setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
+    grid_view->setRenderHint(QPainter::SmoothPixmapTransform);
+    grid_view->setBackgroundBrush(QColor(80, 80, 80));
+    grid_view->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+
+    // Wheel zoom via event filter
+    struct WheelFilter : QObject {
+        QGraphicsView *v;
+        WheelFilter(QGraphicsView *v, QObject *parent) : QObject(parent), v(v) {}
+        bool eventFilter(QObject *, QEvent *e) override {
+            if (e->type() == QEvent::Wheel) {
+                double f = static_cast<QWheelEvent*>(e)->angleDelta().y() > 0 ? 1.15 : 1.0/1.15;
+                v->scale(f, f);
+                return true;
+            }
+            return false;
+        }
+    };
+    grid_view->viewport()->installEventFilter(new WheelFilter(grid_view, &grid_win));
+
+    // Buttons
+    auto *btn_row   = new QHBoxLayout;
+    auto *clear_btn = new QPushButton("Clear Waypoints");
+    auto *begin_btn = new QPushButton("Begin Navigation");
+    auto *stop_btn  = new QPushButton("Stop Navigation");
+    stop_btn->setEnabled(false);
+    btn_row->addWidget(clear_btn);
+    btn_row->addWidget(begin_btn);
+    btn_row->addWidget(stop_btn);
+
+    grid_vbox->addWidget(grid_view);
+    grid_vbox->addLayout(btn_row);
     grid_win.show();
 
+    // Helper: rebuild waypoint scene items from current list
+    auto rebuild_wp_items = [&]() {
+        for (auto *item : wp_items) scene->removeItem(item);
+        wp_items.clear();
+        std::lock_guard<std::mutex> lk(grid_meta_mu);
+        for (size_t i = 0; i < waypoints.size(); i++) {
+            auto [wx, wy] = waypoints[i];
+            int cx = (int)((wx - grid_meta.xMin) / grid_meta.cellSize);
+            int cy = grid_meta.rows - 1 - (int)((wy - grid_meta.yMin) / grid_meta.cellSize);
+            float r = 6.0f;
+            auto *circle = scene->addEllipse(cx-r, cy-r, 2*r, 2*r,
+                QPen(Qt::yellow, 1.5), QBrush(Qt::yellow));
+            auto *label = scene->addText(QString::number(i + 1));
+            label->setDefaultTextColor(Qt::black);
+            label->setPos(cx - r*0.5f, cy - r*1.5f);
+            label->setScale(0.5);
+            wp_items.push_back(circle);
+            wp_items.push_back(label);
+        }
+    };
+
+    // Click on grid view → add waypoint
+    struct ClickFilter : QObject {
+        QGraphicsView *v;
+        std::mutex &meta_mu;
+        GridMeta &meta;
+        std::vector<std::pair<float,float>> &waypoints;
+        std::function<void()> on_add;
+        ClickFilter(QGraphicsView *v, std::mutex &mu, GridMeta &m,
+                    std::vector<std::pair<float,float>> &wp, std::function<void()> cb,
+                    QObject *parent)
+            : QObject(parent), v(v), meta_mu(mu), meta(m), waypoints(wp), on_add(cb) {}
+        bool eventFilter(QObject *, QEvent *e) override {
+            if (e->type() == QEvent::MouseButtonPress) {
+                auto *me = static_cast<QMouseEvent*>(e);
+                if (me->button() == Qt::LeftButton) {
+                    QPointF sp = v->mapToScene(me->pos());
+                    float wx, wy;
+                    {
+                        std::lock_guard<std::mutex> lk(meta_mu);
+                        if (meta.cellSize <= 0 || meta.rows == 0) return false;
+                        wx = meta.xMin + sp.x() * meta.cellSize;
+                        wy = meta.yMin + (meta.rows - 1 - sp.y()) * meta.cellSize;
+                    }
+                    waypoints.push_back({wx, wy});
+                    std::cout << "[NAV] Waypoint " << waypoints.size()
+                              << " added: (" << wx << ", " << wy << ")\n";
+                    on_add();
+                    return true;
+                }
+            }
+            return false;
+        }
+    };
+    grid_view->viewport()->installEventFilter(
+        new ClickFilter(grid_view, grid_meta_mu, grid_meta, waypoints, rebuild_wp_items, &grid_win));
+
+    // Clear button
+    QObject::connect(clear_btn, &QPushButton::clicked, [&]() {
+        waypoints.clear();
+        rebuild_wp_items();
+    });
+
+    // Begin navigation
+    QObject::connect(begin_btn, &QPushButton::clicked, [&]() {
+        if (navigator.isRunning() || waypoints.empty()) return;
+        navigator.setWaypoints(waypoints);
+        navigator.start([&slam]() { return slam.getPose(); });
+        begin_btn->setEnabled(false);
+        stop_btn->setEnabled(true);
+    });
+
+    // Stop navigation
+    QObject::connect(stop_btn, &QPushButton::clicked, [&]() {
+        navigator.stop();
+        begin_btn->setEnabled(true);
+        stop_btn->setEnabled(false);
+    });
+
+    // Poll navigator state to re-enable buttons when it finishes naturally
+    QTimer nav_poll;
+    QObject::connect(&nav_poll, &QTimer::timeout, [&]() {
+        if (!navigator.isRunning() && !begin_btn->isEnabled()) {
+            begin_btn->setEnabled(true);
+            stop_btn->setEnabled(false);
+        }
+    });
+    nav_poll.start(500);
+
+    // Grid update timer
     QTimer grid_timer;
     QObject::connect(&grid_timer, &QTimer::timeout, [&]() {
         float xMin, yMin, cellSize;
@@ -405,7 +659,7 @@ int main(int argc, char *argv[]) {
                 if (v < 0)       px = qRgb(128, 128, 128);  // unknown
                 else if (v == 0) px = qRgb(240, 240, 240);  // free
                 else             px = qRgb(20,  20,  20);   // occupied
-                img.setPixel(c, r, px);
+                img.setPixel(c, grid.rows - 1 - r, px);
             }
         }
 
@@ -428,8 +682,18 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        grid_label->setPixmap(QPixmap::fromImage(img).scaled(
-            grid_label->size(), Qt::KeepAspectRatio, Qt::FastTransformation));
+        // Update pixmap in scene (preserve view transform)
+        pmap_item->setPixmap(QPixmap::fromImage(img));
+        scene->setSceneRect(img.rect());
+
+        // Update grid metadata for click mapping
+        {
+            std::lock_guard<std::mutex> lk(grid_meta_mu);
+            grid_meta = {xMin, yMin, cellSize, grid.rows, grid.cols};
+        }
+
+        // Refresh waypoint positions (grid may have grown)
+        rebuild_wp_items();
     });
     grid_timer.start(2000);  // 0.5 Hz — assembly is graph-wide
 

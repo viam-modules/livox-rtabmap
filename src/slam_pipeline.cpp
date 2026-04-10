@@ -93,6 +93,10 @@ bool SlamPipeline::init(const json &config) {
         std::to_string(rtab.value("linear_update", 0.1))});
     params.insert({rtabmap::Parameters::kRGBDAngularUpdate(),
         std::to_string(rtab.value("angular_update", 0.1))});
+    // Localization-only mode: match against existing map, don't add new nodes
+    if (config.value("localize_only", false)) {
+        params.insert({rtabmap::Parameters::kMemIncrementalMemory(), "false"});
+    }
 
     odom_.reset(rtabmap::Odometry::create(params));
     if (!odom_) {
@@ -105,6 +109,20 @@ bool SlamPipeline::init(const json &config) {
     max_range_ = config.value("max_range", 0.0f);
     max_accel_ = config.value("max_accel", 0.0f);
     accel_holdoff_ = config.value("accel_holdoff", 1.0f);
+
+    // Sensor → base_link extrinsic transform
+    {
+        json ex = config.value("extrinsics", json::object());
+        float tx    = ex.value("x",     0.0f);
+        float ty    = ex.value("y",     0.0f);
+        float tz    = ex.value("z",     0.0f);
+        float roll  = ex.value("roll",  0.0f);
+        float pitch = ex.value("pitch", 0.0f);
+        float yaw   = ex.value("yaw",   0.0f);
+        lidar_to_base_ = rtabmap::Transform(tx, ty, tz, roll, pitch, yaw);
+        std::cout << "[SLAM] Lidar extrinsics: xyz=(" << tx << "," << ty << "," << tz
+                  << ") rpy=(" << roll << "," << pitch << "," << yaw << ")\n";
+    }
 
     db_path_ = config.value("database_path", "");
     if (db_path_.empty()) {
@@ -124,11 +142,24 @@ bool SlamPipeline::init(const json &config) {
         std::to_string(config.value("grid_resolution", 0.05f))});
     grid_params.insert({rtabmap::Parameters::kGridRayTracing(), "true"});
     grid_params.insert({rtabmap::Parameters::kGrid3D(), "false"});
+    // Height filtering
+    grid_params.insert({rtabmap::Parameters::kGridMinGroundHeight(),
+        std::to_string(config.value("grid_min_height", 0.0f))});
+    grid_params.insert({rtabmap::Parameters::kGridMaxObstacleHeight(),
+        std::to_string(config.value("grid_max_height", 0.0f))});
+    // Range, segmentation, noise
+    grid_params.insert({rtabmap::Parameters::kGridRangeMax(),
+        std::to_string(config.value("grid_range_max", 5.0f))});
+    grid_params.insert({rtabmap::Parameters::kGridNormalsSegmentation(),
+        config.value("grid_normals_segmentation", true) ? "true" : "false"});
+    grid_params.insert({rtabmap::Parameters::kGridNoiseFilteringRadius(),
+        std::to_string(config.value("grid_noise_radius", 0.0f))});
     grid_maker_.parseParameters(grid_params);
     occ_grid_ = std::make_unique<rtabmap::OccupancyGrid>(&grid_cache_, grid_params);
 
     std::cout << "[SLAM] Pipeline initialized\n"
               << "  Database: " << db_path_ << "\n"
+              << "  Mode: " << (config.value("localize_only", false) ? "LOCALIZE" : "MAPPING") << "\n"
               << "  ICP: voxel=" << icp.value("voxel_size", 0.03)
               << " corr=" << icp.value("max_correspondence_distance", 0.25)
               << " iter=" << icp.value("iterations", 40) << "\n";
@@ -156,9 +187,7 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
         }
     }
 
-    pcl::PointCloud<pcl::PointXYZ>::Ptr xyz(new pcl::PointCloud<pcl::PointXYZ>);
     auto xyzi_filtered = pcl::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
-    xyz->reserve(cloud->size());
     xyzi_filtered->reserve(cloud->size());
     float min_r2 = min_range_ * min_range_;
     float max_r2 = max_range_ * max_range_;
@@ -166,7 +195,6 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
         float r2 = p.x*p.x + p.y*p.y + p.z*p.z;
         if (min_range_ > 0 && r2 < min_r2) continue;
         if (max_range_ > 0 && r2 > max_r2) continue;
-        xyz->push_back(pcl::PointXYZ(p.x, p.y, p.z));
         xyzi_filtered->push_back(p);
     }
     if (filtered_cloud) {
@@ -174,7 +202,7 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
     }
 
     double stamp = static_cast<double>(timestamp_ns) / 1e9;
-    rtabmap::LaserScan scan = rtabmap::util3d::laserScanFromPointCloud(*xyz);
+    rtabmap::LaserScan scan = rtabmap::util3d::laserScanFromPointCloud(*xyzi_filtered, lidar_to_base_);
     rtabmap::SensorData data(scan, cv::Mat(), cv::Mat(), rtabmap::CameraModel(), 0, stamp);
 
     rtabmap::OdometryInfo odom_info;
@@ -253,6 +281,7 @@ void SlamPipeline::processImu(const ImuReading &imu) {
 }
 
 rtabmap::Transform SlamPipeline::getPose() const {
+    std::lock_guard<std::mutex> lock(slam_mutex_);
     return current_pose_;
 }
 
@@ -280,37 +309,57 @@ cv::Mat SlamPipeline::getOccupancyGrid(float &xMin, float &yMin, float &cellSize
     std::lock_guard<std::mutex> lock(slam_mutex_);
     if (!rtabmap_ || !occ_grid_) return cv::Mat();
 
-    std::map<int, rtabmap::Transform> poses;
+    // Start with loaded map poses so previously mapped areas are always visible
+    std::map<int, rtabmap::Transform> poses = loaded_poses_;
+
+    // Overlay current session poses from getGraph (these may update loaded nodes too)
+    std::map<int, rtabmap::Transform> current_poses;
     std::multimap<int, rtabmap::Link> constraints;
-    rtabmap_->getGraph(poses, constraints, /*optimized=*/true, /*global=*/true);
+    rtabmap_->getGraph(current_poses, constraints, /*optimized=*/false, /*global=*/true);
+    for (auto &[id, p] : current_poses) {
+        poses[id] = p;
+    }
 
     occ_grid_->update(poses);
+    cv::Mat result = occ_grid_->getMap(xMin, yMin);
+
+    static bool grid_debug_printed = false;
+    if (!grid_debug_printed) {
+        grid_debug_printed = true;
+        std::cout << "[GRID] poses=" << poses.size()
+                  << " cache=" << grid_cache_.size()
+                  << " map=" << result.cols << "x" << result.rows << "\n";
+    }
 
     cellSize = occ_grid_->getCellSize();
-    return occ_grid_->getMap(xMin, yMin);
+    return result;
 }
 
-pcl::PointCloud<pcl::PointXYZI>::Ptr SlamPipeline::rebuildMap(int map_id) const {
+pcl::PointCloud<pcl::PointXYZI>::Ptr SlamPipeline::loadMap(int map_id) {
     auto map = pcl::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
     if (!rtabmap_) return map;
+    std::lock_guard<std::mutex> lock(slam_mutex_);
 
     std::map<int, rtabmap::Signature> signatures;
     std::map<int, rtabmap::Transform> poses;
     std::multimap<int, rtabmap::Link> constraints;
-    rtabmap_->get3DMap(signatures, poses, constraints, true, true);
+    rtabmap_->get3DMap(signatures, poses, constraints, false, true);
 
+    // --- Pass 1: rebuild display point cloud and collect poses ---
+    loaded_poses_.clear();
     int included = 0;
-    for (auto &[id, pose] : poses) {
+    for (auto &[id, sig] : signatures) {
+        rtabmap::Transform pose = poses.count(id) ? poses.at(id) : sig.getPose();
         if (pose.isNull()) continue;
-        auto it = signatures.find(id);
-        if (it == signatures.end()) continue;
-        if (map_id >= 0 && it->second.mapId() != map_id) continue;
+        if (map_id >= 0 && sig.mapId() != map_id) continue;
 
-        rtabmap::LaserScan scan = it->second.sensorData().laserScanRaw();
+        rtabmap::LaserScan scan = sig.sensorData().laserScanRaw();
         if (scan.isEmpty()) {
-            it->second.sensorData().uncompressData(nullptr, nullptr, &scan);
+            sig.sensorData().uncompressData(nullptr, nullptr, &scan);
         }
         if (scan.isEmpty()) continue;
+
+        loaded_poses_[id] = pose;
 
         pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = rtabmap::util3d::laserScanToPointCloud(scan, pose);
         for (const auto &p : *cloud) {
@@ -324,10 +373,37 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr SlamPipeline::rebuildMap(int map_id) const 
 
     map->width = map->size();
     map->height = 1;
-    std::cout << "[SLAM] Rebuilt map: " << map->size() << " points from "
+    std::cout << "[SLAM] Loaded map: " << map->size() << " points from "
               << included << " nodes"
               << (map_id >= 0 ? " (map " + std::to_string(map_id) + ")" : " (all sessions)")
               << "\n";
+
+    // --- Pass 2: populate occupancy grid cache (best-effort) ---
+    int grid_nodes = 0;
+    for (auto &[id, sig] : signatures) {
+        rtabmap::Transform pose = poses.count(id) ? poses.at(id) : sig.getPose();
+        if (pose.isNull()) continue;
+        if (map_id >= 0 && sig.mapId() != map_id) continue;
+        if (grid_cache_.find(id) != grid_cache_.end()) continue;
+
+        rtabmap::LaserScan scan = sig.sensorData().laserScanRaw();
+        if (scan.isEmpty()) {
+            sig.sensorData().uncompressData(nullptr, nullptr, &scan);
+        }
+        if (scan.isEmpty()) continue;
+
+        try {
+            cv::Mat ground, obstacles, empty;
+            cv::Point3f viewPoint(0, 0, 0);
+            grid_maker_.createLocalMap(scan, pose, ground, obstacles, empty, viewPoint);
+            grid_cache_.add(id, ground, obstacles, empty, grid_maker_.getCellSize(), viewPoint);
+            last_grid_node_id_ = id;
+            grid_nodes++;
+        } catch (const std::exception &e) {
+            std::cerr << "[SLAM] Grid cache skipped node " << id << ": " << e.what() << "\n";
+        }
+    }
+    std::cout << "[SLAM] Grid cache populated: " << grid_nodes << " nodes\n";
     return map;
 }
 
@@ -358,4 +434,36 @@ int SlamPipeline::lastMapId() const {
     int last = -1;
     for (const auto &[id, sig] : signatures) last = std::max(last, sig.mapId());
     return last;
+}
+
+std::pair<int,int> SlamPipeline::postProcess(const json &config) {
+    if (!rtabmap_) return {0, 0};
+    std::lock_guard<std::mutex> lock(slam_mutex_);
+
+    json pp = config.value("post_process", json::object());
+    bool detect_loops  = pp.value("detect_loops",  true);
+    bool refine        = pp.value("refine_links",   true);
+    float cluster_radius = pp.value("loop_cluster_radius", 1.0f);
+    float cluster_angle  = pp.value("loop_cluster_angle",  static_cast<float>(M_PI / 6.0));
+    int   iterations     = pp.value("loop_iterations", 1);
+
+    int loops_found   = 0;
+    int links_refined = 0;
+
+    if (detect_loops) {
+        std::cout << "[POST] Detecting loop closures "
+                  << "(radius=" << cluster_radius << "m, iter=" << iterations << ")...\n";
+        loops_found = rtabmap_->detectMoreLoopClosures(
+            cluster_radius, cluster_angle, iterations,
+            /*intraSession=*/true, /*interSession=*/true);
+        std::cout << "[POST] " << loops_found << " loop closure(s) added\n";
+    }
+
+    if (refine) {
+        std::cout << "[POST] Refining links...\n";
+        links_refined = rtabmap_->refineLinks();
+        std::cout << "[POST] " << links_refined << " link(s) refined\n";
+    }
+
+    return {loops_found, links_refined};
 }

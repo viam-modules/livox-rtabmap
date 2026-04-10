@@ -52,6 +52,7 @@ set(SOURCES
     src/slam_pipeline.cpp
     src/pcd_player.cpp
     src/imu_reader.cpp
+    src/navigator.cpp
 )
 if(WITH_VIAM)
     list(APPEND SOURCES src/viam_client.cpp)
