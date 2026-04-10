@@ -11,7 +11,12 @@
 #include <vector>
 
 #include <QApplication>
+#include <QImage>
+#include <QLabel>
+#include <QPixmap>
 #include <QTimer>
+#include <QVBoxLayout>
+#include <QWidget>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -26,6 +31,9 @@
 #include "livox_receiver.h"
 #include "pcd_player.h"
 #include "slam_pipeline.h"
+#ifdef HAVE_VIAM_SDK
+#include "viam_client.h"
+#endif
 
 using json = nlohmann::json;
 
@@ -81,6 +89,7 @@ int main(int argc, char *argv[]) {
     std::string imu_dir = config.value("imu_dir", "");
     int playback_delay_ms = config.value("playback_delay_ms", 0);
     bool headless = config.value("headless", false);
+    std::string data_source = config.value("data_source", "livox");
     float map_voxel = config.value("map_voxel_size", 0.03f);
     int downsample_interval = config.value("map_downsample_interval", 50);
     std::string color_mode = config.value("color_mode", "intensity");
@@ -98,6 +107,12 @@ int main(int argc, char *argv[]) {
               << "  Config: " << config_path << "\n";
     if (!playback_dir.empty()) {
         std::cout << "  Mode:   playback from " << playback_dir << "\n";
+    } else if (data_source == "viam") {
+        auto &vc = config.at("viam");
+        std::cout << "  Source: viam (" << vc.value("address", "") << ")\n"
+                  << "  Lidar:  " << vc.value("lidar_name", "") << "\n"
+                  << "  IMU:    " << vc.value("imu_name", "(none)") << "\n"
+                  << "  Mode:   " << (headless ? "headless" : "GUI") << "\n";
     } else {
         std::cout << "  Sensor: " << sensor_ip << "\n"
                   << "  Host:   " << host_ip << "\n"
@@ -225,21 +240,59 @@ int main(int argc, char *argv[]) {
         return ret;
     }
 
+    // Build data source start/stop for live modes (Livox or Viam)
+    std::function<bool(FrameCallback, IMUCallback)> source_start;
+    std::function<void()> source_stop;
+
+    if (data_source == "viam") {
+#ifdef HAVE_VIAM_SDK
+        auto &vc = config.at("viam");
+
+        // Credentials come from env vars (same .env file as other Viam modules).
+        // Config values are used as fallback if the env vars are not set.
+        auto from_env = [](const char *var, const std::string &fallback) {
+            const char *v = std::getenv(var);
+            return (v && v[0]) ? std::string(v) : fallback;
+        };
+
+        ViamClient::Config vcfg;
+        vcfg.address     = vc.value("address", "");
+        vcfg.api_key     = from_env("VIAM_API_KEY",    vc.value("api_key", ""));
+        vcfg.api_key_id  = from_env("VIAM_API_KEY_ID", vc.value("api_key_id", ""));
+        vcfg.lidar_name  = vc.value("lidar_name", "");
+        vcfg.imu_name    = vc.value("imu_name", "");
+        vcfg.cloud_hz    = vc.value("cloud_hz", 10);
+        vcfg.imu_hz      = vc.value("imu_hz", 100);
+        auto client = std::make_shared<ViamClient>(vcfg);
+        source_start = [client](FrameCallback f, IMUCallback i) { return client->start(f, i); };
+        source_stop  = [client]() { client->stop(); };
+#else
+        std::cerr << "data_source=viam but HAVE_VIAM_SDK not compiled in.\n"
+                  << "Install viam-cpp-sdk and rebuild.\n";
+        return 1;
+#endif
+    } else {
+        auto receiver = std::make_shared<LivoxReceiver>(sensor_ip, host_ip);
+        source_start = [receiver](FrameCallback f, IMUCallback i) { return receiver->start(f, i); };
+        source_stop  = [receiver]() { receiver->stop(); };
+    }
+
+    auto frame_cb = [&slam](pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t ts) {
+        slam.processCloud(cloud, ts);
+    };
+    auto imu_cb = [&slam](const LivoxIMU &imu) {
+        slam.processIMU(imu.gyro_x, imu.gyro_y, imu.gyro_z,
+                        imu.acc_x, imu.acc_y, imu.acc_z,
+                        imu.timestamp_ns);
+    };
+
     // Live mode — headless
     if (headless) {
-        LivoxReceiver receiver(sensor_ip, host_ip);
-        bool ok = receiver.start(
-            [&slam](pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t ts) {
-                slam.processCloud(cloud, ts);
-            },
-            [&slam](const LivoxIMU &imu) {
-                slam.processIMU(imu.gyro_x, imu.gyro_y, imu.gyro_z,
-                                imu.acc_x, imu.acc_y, imu.acc_z,
-                                imu.timestamp_ns);
-            });
-        if (!ok) { std::cerr << "Failed to start Livox receiver\n"; return 1; }
+        if (!source_start(frame_cb, imu_cb)) {
+            std::cerr << "Failed to start data source\n"; return 1;
+        }
         while (running) std::this_thread::sleep_for(std::chrono::seconds(1));
-        receiver.stop();
+        source_stop();
         return 0;
     }
 
@@ -264,18 +317,21 @@ int main(int argc, char *argv[]) {
     int max_frame_id = 0;
 
     bool load_previous = config.value("load_previous_map", false);
-    if (load_previous) {
-        auto rebuilt = slam.rebuildMap();
+    bool load_largest  = config.value("load_largest_map", false);
+    if (load_previous || load_largest) {
+        int target_id = load_largest ? slam.largestMapId() : slam.lastMapId();
+        std::cout << "[VIEWER] Loading " << (load_largest ? "largest" : "last")
+                  << " map (id=" << target_id << ")\n";
+        auto rebuilt = slam.rebuildMap(target_id);
         if (rebuilt->size() > 0) {
-            std::cout << "[VIEWER] Loaded " << rebuilt->size() << " points from previous session\n";
+            std::cout << "[VIEWER] Loaded " << rebuilt->size() << " points\n";
             for (const auto &p : *rebuilt) {
                 map_points.push_back({p.x, p.y, p.z, p.intensity, 0});
             }
         }
     }
 
-    LivoxReceiver receiver(sensor_ip, host_ip);
-    bool ok = receiver.start(
+    bool ok = source_start(
         [&](pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t ts) {
             pcl::PointCloud<pcl::PointXYZI>::Ptr filtered;
             bool success = slam.processCloud(cloud, ts, &filtered);
@@ -291,7 +347,7 @@ int main(int argc, char *argv[]) {
                             imu.acc_x, imu.acc_y, imu.acc_z,
                             imu.timestamp_ns);
         });
-    if (!ok) { std::cerr << "Failed to start Livox receiver\n"; return 1; }
+    if (!ok) { std::cerr << "Failed to start data source\n"; return 1; }
 
     // Config live reload
     auto last_config_write = std::filesystem::last_write_time(config_path);
@@ -321,6 +377,61 @@ int main(int argc, char *argv[]) {
         }
     });
     config_timer.start(2000);
+
+    // Occupancy grid window
+    QWidget grid_win;
+    grid_win.setWindowTitle("Occupancy Grid");
+    grid_win.resize(600, 600);
+    auto *grid_layout = new QVBoxLayout(&grid_win);
+    grid_layout->setContentsMargins(0, 0, 0, 0);
+    auto *grid_label = new QLabel(&grid_win);
+    grid_label->setAlignment(Qt::AlignCenter);
+    grid_label->setStyleSheet("background: #808080;");
+    grid_layout->addWidget(grid_label);
+    grid_win.show();
+
+    QTimer grid_timer;
+    QObject::connect(&grid_timer, &QTimer::timeout, [&]() {
+        float xMin, yMin, cellSize;
+        cv::Mat grid = slam.getOccupancyGrid(xMin, yMin, cellSize);
+        if (grid.empty()) return;
+
+        // CV_8SC1: -1=unknown, 0=free, 100=occupied
+        QImage img(grid.cols, grid.rows, QImage::Format_RGB888);
+        for (int r = 0; r < grid.rows; r++) {
+            for (int c = 0; c < grid.cols; c++) {
+                auto v = grid.at<int8_t>(r, c);
+                QRgb px;
+                if (v < 0)       px = qRgb(128, 128, 128);  // unknown
+                else if (v == 0) px = qRgb(240, 240, 240);  // free
+                else             px = qRgb(20,  20,  20);   // occupied
+                img.setPixel(c, r, px);
+            }
+        }
+
+        // Overlay trajectory and current pose
+        {
+            std::lock_guard<std::mutex> lock(cloud_mu);
+            for (const auto &[tx, ty] : trajectory_xz) {
+                int cx = (int)((tx - xMin) / cellSize);
+                int cy = grid.rows - 1 - (int)((ty - yMin) / cellSize);
+                if (cx >= 0 && cx < grid.cols && cy >= 0 && cy < grid.rows)
+                    img.setPixel(cx, cy, qRgb(255, 50, 255));
+            }
+            if (!trajectory_xz.empty()) {
+                int cx = (int)((trajectory_xz.back().first  - xMin) / cellSize);
+                int cy = grid.rows - 1 - (int)((trajectory_xz.back().second - yMin) / cellSize);
+                for (int d = -3; d <= 3; d++) {
+                    if (cx+d >= 0 && cx+d < grid.cols) img.setPixel(cx+d, cy, qRgb(0, 255, 0));
+                    if (cy+d >= 0 && cy+d < grid.rows) img.setPixel(cx, cy+d, qRgb(0, 255, 0));
+                }
+            }
+        }
+
+        grid_label->setPixmap(QPixmap::fromImage(img).scaled(
+            grid_label->size(), Qt::KeepAspectRatio, Qt::FastTransformation));
+    });
+    grid_timer.start(2000);  // 0.5 Hz — assembly is graph-wide
 
     QTimer update_timer;
     QObject::connect(&update_timer, &QTimer::timeout, [&]() {
@@ -458,7 +569,7 @@ int main(int argc, char *argv[]) {
 
     int ret = app.exec();
     running = false;
-    receiver.stop();
+    source_stop();
 
     std::cout << "\nFinal: " << slam.getFrameCount() << " frames, "
               << map_points.size() << " map points\n"
