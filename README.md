@@ -56,7 +56,7 @@ All parameters are in `config/default.json`. Edit and restart — no recompile n
 |-----------|------|---------|-------------|
 | `headless` | bool | `false` | If true, run without the Qt 3D viewer (console output only) |
 | `database_path` | string | `"livox_slam.db"` | Path to the rtabmap database file. SLAM state (poses, graph, sensor data) is saved here on exit and reloaded on next launch. Relative to the working directory |
-| `load_previous_map` | bool | `false` | If true, reconstruct and display the point cloud map from the existing database on startup. If false, start with an empty viewer (database is still loaded by rtabmap internally) |
+| `load_map` | null/string/int | `null` | Load and display a previous session's map on startup. See **Map Loading** section below |
 | `use_imu_prior` | bool | `false` | If true, feed Mid-360 IMU data (200Hz gyro + accelerometer) into rtabmap's odometry as a motion prior. Helps ICP converge during fast motion by giving it a starting guess close to the true pose |
 
 ### Map Display
@@ -115,3 +115,153 @@ These control the graph SLAM backend (loop closure, map management).
 | `proximity_by_space` | bool | `true` | — | Enable spatial proximity detection for loop closure candidates. When true, nearby poses in space (not just in sequence) are checked for loop closures |
 | `linear_update` | float | `0.1` | meters | Minimum translation since last node to add a new node to the graph. 0.1 = 100mm. Prevents adding redundant nodes when stationary |
 | `angular_update` | float | `0.1` | radians | Minimum rotation since last node to add a new node to the graph. 0.1 = ~6 degrees |
+
+### Map Loading
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `load_map` | null / string / int | `null` | Load a previous session on startup. `null` = fresh start. `"largest"` = load the session with the most nodes. `"last"` = load the most recently created session. Integer = load a specific `map_id` (use `tools/prune-db` to list IDs) |
+| `localize_only` | bool | `false` | If true, disables adding new nodes — RTAB-Map only localizes against the loaded map. Requires `load_map` to be set. Note: with LiDAR-only, the robot must start near the same origin as the loaded map for localization to lock on |
+
+### Extrinsics
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `extrinsics.x/y/z` | float | `0.0` | Translation from LiDAR sensor to robot base_link origin, in meters |
+| `extrinsics.roll/pitch/yaw` | float | `0.0` | Rotation from LiDAR sensor to robot base_link, in radians |
+
+### Post-Processing (`post_process` section, playback only)
+
+Runs automatically after all frames are ingested in playback mode. Improves loop closure and map accuracy.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `detect_loops` | bool | `true` | Search all node pairs spatially for loop closures missed during live processing |
+| `refine_links` | bool | `true` | Re-run ICP on all detected loop closure links to tighten alignment |
+| `loop_cluster_radius` | float | `1.0` | meters — max spatial distance between nodes to consider as a loop closure candidate. Increase if odometry drift is significant |
+| `loop_cluster_angle` | float | `0.5236` | radians (~30°) — max angular difference between nodes to consider as a candidate |
+| `loop_iterations` | int | `1` | Number of detection passes. Each pass can find new loops gated by previously uncorrected poses |
+
+---
+
+## Viam Client
+
+The Viam data source streams live point clouds and IMU data from a Viam-connected robot instead of a directly-attached LiDAR.
+
+### Build with Viam support
+
+```bash
+# Install Viam C++ SDK and deps
+make setup-viam
+
+# Build with Viam enabled
+make viam
+```
+
+### Credentials
+
+Create `tools/fetch-data/.env` (copy from `.env.example`) and fill in your Viam credentials:
+
+```bash
+cp tools/fetch-data/.env.example tools/fetch-data/.env
+```
+
+```ini
+VIAM_API_KEY=your_api_key_here
+VIAM_API_KEY_ID=your_api_key_id_here
+```
+
+The remaining fields (`VIAM_ORG_ID`, `VIAM_MACHINE_ID`, etc.) are only needed for `tools/fetch-data`.
+
+### Configure
+
+Edit `config/viam.json`:
+
+```json
+{
+  "data_source": "viam",
+  "viam": {
+    "address":    "your-machine.viam.cloud",
+    "lidar_name": "livox-pc",
+    "imu_name":   "livox-imu",
+    "cloud_hz":   10,
+    "imu_hz":     100
+  },
+  ...
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `address` | Your machine's Viam cloud address (from the Viam app → Connect tab) |
+| `lidar_name` | Name of the point cloud component in your Viam config |
+| `imu_name` | Name of the IMU/movement sensor component. Leave empty to disable IMU |
+| `cloud_hz` | Point cloud polling rate in Hz |
+| `imu_hz` | IMU polling rate in Hz |
+
+### Run
+
+```bash
+# Source credentials and run
+make run-viam ENV_FILE=tools/fetch-data/.env
+
+# Or with a custom env file
+make run-viam ENV_FILE=/path/to/.env
+```
+
+---
+
+## Fetch Tool (`tools/fetch-data`)
+
+Downloads point cloud (PCD) and IMU data from Viam's data platform for offline playback.
+
+### Setup
+
+```bash
+cd tools/fetch-data
+cp .env.example .env
+# Fill in all fields in .env
+```
+
+### Usage
+
+```bash
+cd tools/fetch-data
+go run . --out ../../data/my_session
+
+# Fetch last 2 hours only
+go run . --out ../../data/my_session --since 2h
+
+# Fetch a specific time range
+go run . --out ../../data/my_session --start "2025-03-27T10:00:00Z" --end "2025-03-27T11:00:00Z"
+
+# Parallel downloads (default 4 workers)
+go run . --out ../../data/my_session --workers 8
+```
+
+Downloaded PCD files go to `<out>/pcd/` and IMU data to `<out>/imu.jsonl`. Point to them in `config/playback.json`:
+
+```json
+{
+  "playback_dir": "data/my_session/pcd",
+  "imu_dir": "data/my_session"
+}
+```
+
+---
+
+## Database Tools (`tools/prune-db`)
+
+```bash
+# List all sessions in a database
+tools/prune-db path/to/map.db
+
+# Delete sessions with fewer than N nodes
+tools/prune-db path/to/map.db --min 50
+
+# Keep only one session, delete everything else
+tools/prune-db path/to/map.db --keep 3
+
+# Skip confirmation prompt
+tools/prune-db path/to/map.db --keep 3 -y
+```
