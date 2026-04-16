@@ -39,6 +39,7 @@
 
 #include "livox_receiver.h"
 #include "navigator.h"
+#include "planner.h"
 #include "pcd_player.h"
 #include "slam_pipeline.h"
 #ifdef HAVE_VIAM_SDK
@@ -136,6 +137,142 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    // Combine mode: post-process an existing multi-session database
+    if (data_source == "combine") {
+        bool post_processing_needed =
+            config.value("post_process", json::object()).value("detect_loops", true) ||
+            config.value("post_process", json::object()).value("refine_links",  true);
+
+        if (headless) {
+            std::cout << "Loading existing map...\n";
+            slam.loadMap(-1);
+            if (post_processing_needed) slam.postProcess(config);
+            std::cout << "Done. Database: " << slam.getDatabasePath() << "\n";
+            return 0;
+        }
+
+        QApplication app(argc, argv);
+
+        rtabmap::CloudViewer viewer;
+        viewer.setWindowTitle("Livox SLAM (combine)");
+        viewer.setBackgroundColor(QColor(20, 20, 20));
+        viewer.setGridShown(true);
+        viewer.resize(1280, 720);
+        float cam_dist = config.value("camera_distance", 10.0f);
+        float d = cam_dist / 1.732f;
+        viewer.setCameraPosition(d, d, d, 0, 0, 0, 0, 0, 1);
+        viewer.show();
+
+        std::mutex cloud_mu;
+        pcl::PointCloud<pcl::PointXYZI>::Ptr accumulated_map(new pcl::PointCloud<pcl::PointXYZI>);
+        std::atomic<bool> post_processing{false};
+        std::atomic<bool> post_process_done{false};
+        std::atomic<bool> map_reloaded{false};
+
+        // Load existing sessions for initial display
+        {
+            auto initial = slam.loadMap(-1);
+            std::lock_guard<std::mutex> lk(cloud_mu);
+            accumulated_map = initial;
+        }
+        viewer.addCloud("map", accumulated_map);
+        viewer.refreshView();
+
+        // Occupancy grid window
+        QWidget grid_win;
+        grid_win.setWindowTitle("Occupancy Grid (combine)");
+        grid_win.resize(700, 700);
+        auto *cm_vbox    = new QVBoxLayout(&grid_win);
+        cm_vbox->setContentsMargins(4, 4, 4, 4);
+        auto *cm_scene   = new QGraphicsScene(&grid_win);
+        auto *cm_view    = new QGraphicsView(cm_scene, &grid_win);
+        auto *cm_pmap    = cm_scene->addPixmap(QPixmap());
+        cm_view->setDragMode(QGraphicsView::ScrollHandDrag);
+        cm_view->setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
+        cm_view->setRenderHint(QPainter::SmoothPixmapTransform);
+        cm_view->setBackgroundBrush(QColor(80, 80, 80));
+        cm_view->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        cm_vbox->addWidget(cm_view);
+
+        struct CmWheelFilter : QObject {
+            QGraphicsView *v;
+            CmWheelFilter(QGraphicsView *v, QObject *p) : QObject(p), v(v) {}
+            bool eventFilter(QObject *, QEvent *e) override {
+                if (e->type() == QEvent::Wheel) {
+                    double f = static_cast<QWheelEvent*>(e)->angleDelta().y() > 0 ? 1.15 : 1.0/1.15;
+                    v->scale(f, f);
+                    return true;
+                }
+                return false;
+            }
+        };
+        cm_view->viewport()->installEventFilter(new CmWheelFilter(cm_view, &grid_win));
+        grid_win.show();
+
+        // Combine thread: post-process, then reload with optimized poses
+        std::thread combine_thread([&]() {
+            if (!post_processing_needed) return;
+            post_processing = true;
+            slam.postProcess(config);
+            std::cout << "Reloading map with optimized poses...\n";
+            auto opt = slam.loadMap(-1);
+            {
+                std::lock_guard<std::mutex> lk(cloud_mu);
+                accumulated_map = opt;
+            }
+            map_reloaded = true;
+            post_processing = false;
+            post_process_done = true;
+            std::cout << "Combine done. Database: " << slam.getDatabasePath() << "\n";
+        });
+
+        // Grid timer
+        bool grid_refreshed_after_postprocess = false;
+        QTimer cm_grid_timer;
+        QObject::connect(&cm_grid_timer, &QTimer::timeout, [&]() {
+            if (post_processing) return;
+            if (post_process_done && grid_refreshed_after_postprocess) return;
+            float xMin, yMin, cellSize;
+            cv::Mat grid = slam.getOccupancyGrid(xMin, yMin, cellSize);
+            if (grid.empty()) return;
+            QImage img(grid.cols, grid.rows, QImage::Format_RGB888);
+            for (int r = 0; r < grid.rows; r++) {
+                for (int c = 0; c < grid.cols; c++) {
+                    auto v = grid.at<int8_t>(r, c);
+                    QRgb px;
+                    if (v < 0)       px = qRgb(128, 128, 128);
+                    else if (v == 0) px = qRgb(240, 240, 240);
+                    else             px = qRgb(20,  20,  20);
+                    img.setPixel(c, grid.rows - 1 - r, px);
+                }
+            }
+            cm_pmap->setPixmap(QPixmap::fromImage(img));
+            cm_scene->setSceneRect(img.rect());
+            if (post_process_done) grid_refreshed_after_postprocess = true;
+        });
+        cm_grid_timer.start(2000);
+
+        // CloudViewer update timer
+        QTimer cm_update_timer;
+        QObject::connect(&cm_update_timer, &QTimer::timeout, [&]() {
+            if (!running) { app.quit(); return; }
+            if (map_reloaded.exchange(false)) {
+                std::lock_guard<std::mutex> lk(cloud_mu);
+                viewer.addCloud("map", accumulated_map);
+                QString status = post_process_done ? " | Combine done" : " | Combining...";
+                viewer.setWindowTitle(QString("Livox SLAM (combine) | Map: %1 pts%2")
+                    .arg(accumulated_map->size()).arg(status));
+                viewer.refreshView();
+            }
+        });
+        cm_update_timer.start(100);
+
+        int ret = app.exec();
+        running = false;
+        combine_thread.join();
+        return ret;
+    }
+
     // Playback mode: replay downloaded PCD files through the SLAM pipeline
     if (!playback_dir.empty()) {
         PcdPlayer player;
@@ -144,7 +281,7 @@ int main(int argc, char *argv[]) {
             return 1;
         }
         if (!imu_dir.empty()) {
-            player.loadImu(imu_dir); // non-fatal if missing
+            player.loadImu(imu_dir, config.value("imu_use_orientation", false)); // non-fatal if missing
         }
 
         auto imuCb = [&slam](const ImuReading &imu) {
@@ -153,15 +290,17 @@ int main(int argc, char *argv[]) {
 
         if (headless) {
             player.play(
-                [&slam](pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t ts) {
+                [&](pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t ts) {
+                    if (!running) { player.stop(); return; }
                     slam.processCloud(cloud, ts);
                 },
                 imuCb,
                 playback_delay_ms);
 
             std::cout << "\nPlayback done: " << slam.getFrameCount() << " frames processed\n";
-            if (config.value("post_process", json::object()).value("detect_loops", true) ||
-                config.value("post_process", json::object()).value("refine_links",  true)) {
+            if (running &&
+                (config.value("post_process", json::object()).value("detect_loops", true) ||
+                 config.value("post_process", json::object()).value("refine_links",  true))) {
                 slam.postProcess(config);
             }
             std::cout << "Database saved to: " << slam.getDatabasePath() << "\n";
@@ -189,9 +328,17 @@ int main(int argc, char *argv[]) {
         int frame_count = 0;
         bool playback_done = false;
 
+        bool post_processing_needed =
+            config.value("post_process", json::object()).value("detect_loops", true) ||
+            config.value("post_process", json::object()).value("refine_links",  true);
+        std::atomic<bool> post_processing{false};
+        std::atomic<bool> post_process_done{false};
+        std::atomic<bool> map_reloaded{false};
+
         std::thread play_thread([&]() {
             player.play(
                 [&](pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t ts) {
+                    if (!running) { player.stop(); return; }
                     if (slam.processCloud(cloud, ts)) {
                         std::lock_guard<std::mutex> lock(cloud_mu);
                         latest_cloud = cloud;
@@ -202,7 +349,29 @@ int main(int argc, char *argv[]) {
                 },
                 imuCb,
                 playback_delay_ms);
+
             playback_done = true;
+            std::cout << "\nPlayback done: " << slam.getFrameCount() << " frames processed\n";
+
+            if (post_processing_needed && running) {
+                post_processing = true;
+                slam.postProcess(config);
+
+                // Reload map with optimized poses — rebuilds point cloud + grid cache
+                std::cout << "Reloading map with optimized poses...\n";
+                auto optimized_map = slam.loadMap(-1);
+                auto optimized_traj = slam.getTrajectory();
+                {
+                    std::lock_guard<std::mutex> lock(cloud_mu);
+                    accumulated_map = optimized_map;
+                    trajectory_xz   = std::move(optimized_traj);
+                }
+                map_reloaded = true;
+                post_processing = false;  // allow grid timer to fire for final refresh
+                post_process_done = true;
+                std::cout << "Map reloaded. Database saved to: "
+                          << slam.getDatabasePath() << "\n";
+            }
         });
 
         // Occupancy grid window
@@ -241,7 +410,10 @@ int main(int argc, char *argv[]) {
         grid_win.show();
 
         QTimer pb_grid_timer;
+        bool grid_refreshed_after_postprocess = false;
         QObject::connect(&pb_grid_timer, &QTimer::timeout, [&]() {
+            if (post_processing) return;
+            if (post_process_done && grid_refreshed_after_postprocess) return;
             float xMin, yMin, cellSize;
             cv::Mat grid = slam.getOccupancyGrid(xMin, yMin, cellSize);
             if (grid.empty()) return;
@@ -278,6 +450,7 @@ int main(int argc, char *argv[]) {
 
             pb_pmap_item->setPixmap(QPixmap::fromImage(img));
             pb_scene->setSceneRect(img.rect());
+            if (post_process_done) grid_refreshed_after_postprocess = true;
         });
         pb_grid_timer.start(2000);
 
@@ -287,6 +460,17 @@ int main(int argc, char *argv[]) {
                 app.quit();
                 return;
             }
+
+            // Post-processing finished: swap in the optimized map and re-render
+            if (map_reloaded.exchange(false)) {
+                std::lock_guard<std::mutex> lock(cloud_mu);
+                viewer.addCloud("map", accumulated_map);
+                viewer.setWindowTitle(QString("Livox SLAM (playback) | Frame %1 / %2 | Map: %3 pts | Post-processing done")
+                    .arg(frame_count).arg(player.frameCount()).arg(accumulated_map->size()));
+                viewer.refreshView();
+                return;
+            }
+
             if (playback_done && !latest_cloud) return;
             std::lock_guard<std::mutex> lock(cloud_mu);
             if (!latest_cloud) return;
@@ -316,8 +500,12 @@ int main(int argc, char *argv[]) {
             viewer.addCloud("map", accumulated_map);
             viewer.addCloud("scan", latest_cloud, latest_pose);
             latest_cloud.reset();
-            viewer.setWindowTitle(QString("Livox SLAM (playback) | Frame %1 / %2 | Map: %3 pts")
-                .arg(frame_count).arg(player.frameCount()).arg(accumulated_map->size()));
+            QString status;
+            if (post_process_done)       status = " | Post-processing done";
+            else if (post_processing)    status = " | Post-processing...";
+            else if (playback_done)      status = " | Playback done";
+            viewer.setWindowTitle(QString("Livox SLAM (playback) | Frame %1 / %2 | Map: %3 pts%4")
+                .arg(frame_count).arg(player.frameCount()).arg(accumulated_map->size()).arg(status));
             viewer.refreshView();
         });
         update_timer.start(33);
@@ -327,9 +515,8 @@ int main(int argc, char *argv[]) {
         player.stop();
         play_thread.join();
 
-        std::cout << "\nPlayback done: " << slam.getFrameCount() << " frames processed\n";
-        if (config.value("post_process", json::object()).value("detect_loops", true) ||
-            config.value("post_process", json::object()).value("refine_links",  true)) {
+        if (!post_process_done && post_processing_needed) {
+            // User closed window before post-processing finished — run it now.
             slam.postProcess(config);
         }
         std::cout << "Database saved to: " << slam.getDatabasePath() << "\n";
@@ -500,9 +687,20 @@ int main(int argc, char *argv[]) {
 
     // Waypoints in world space (x, y metres).
     std::vector<std::pair<float,float>> waypoints;
+    // Planned path (A* output) — stored so it can be drawn on the grid.
+    std::vector<std::pair<float,float>> planned_path;
 
-    // Navigator
+    // Navigator — load from "navigator" config block
     Navigator::Config nav_cfg;
+    {
+        json nc = config.value("navigator", json::object());
+        nav_cfg.arrival_radius    = nc.value("arrival_radius",    nav_cfg.arrival_radius);
+        nav_cfg.heading_threshold = nc.value("heading_threshold", nav_cfg.heading_threshold);
+        nav_cfg.forward_speed     = nc.value("forward_speed",     nav_cfg.forward_speed);
+        nav_cfg.angular_gain      = nc.value("angular_gain",      nav_cfg.angular_gain);
+        nav_cfg.angular_max       = nc.value("angular_max",       nav_cfg.angular_max);
+        nav_cfg.update_hz         = nc.value("update_hz",         nav_cfg.update_hz);
+    }
     Navigator navigator(nav_cfg);
 
     QWidget grid_win;
@@ -518,6 +716,23 @@ int main(int argc, char *argv[]) {
     auto *pmap_item  = scene->addPixmap(QPixmap());
     // Waypoint items live on the scene; we rebuild them when the list changes.
     std::vector<QGraphicsItem*> wp_items;
+    std::vector<QGraphicsItem*> plan_items;
+
+    // Pose arrow — shaft + arrowhead pointing in +X (right), rotated each tick
+    QPolygonF arrow_poly;
+    {
+        float L = 10, W = 3.5f, hw = 7, hl = 5;
+        arrow_poly << QPointF(-L/2,   -W/2)
+                   << QPointF(L/2-hl, -W/2)
+                   << QPointF(L/2-hl, -hw/2)
+                   << QPointF(L/2,     0)
+                   << QPointF(L/2-hl,  hw/2)
+                   << QPointF(L/2-hl,  W/2)
+                   << QPointF(-L/2,    W/2);
+    }
+    auto *pose_arrow = scene->addPolygon(arrow_poly,
+        QPen(QColor(0, 220, 0), 1), QBrush(QColor(0, 220, 0)));
+    pose_arrow->setVisible(false);
 
     grid_view->setDragMode(QGraphicsView::ScrollHandDrag);
     grid_view->setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
@@ -575,6 +790,38 @@ int main(int argc, char *argv[]) {
         }
     };
 
+    // Helper: rebuild planned-path scene items (A* output)
+    auto rebuild_plan_items = [&]() {
+        for (auto *item : plan_items) scene->removeItem(item);
+        plan_items.clear();
+        if (planned_path.empty()) return;
+        std::lock_guard<std::mutex> lk(grid_meta_mu);
+        if (grid_meta.cellSize <= 0 || grid_meta.rows == 0) return;
+
+        auto toScene = [&](std::pair<float,float> wp) -> QPointF {
+            float sx = (wp.first  - grid_meta.xMin) / grid_meta.cellSize;
+            float sy = grid_meta.rows - 1 - (wp.second - grid_meta.yMin) / grid_meta.cellSize;
+            return {sx, sy};
+        };
+
+        // Lines connecting consecutive waypoints
+        QPen line_pen(QColor(0, 200, 255), 1.5, Qt::DashLine);
+        for (size_t i = 1; i < planned_path.size(); i++) {
+            QPointF a = toScene(planned_path[i-1]);
+            QPointF b = toScene(planned_path[i]);
+            plan_items.push_back(scene->addLine(a.x(), a.y(), b.x(), b.y(), line_pen));
+        }
+        // Dot at each intermediate waypoint (skip first/last which overlap start/goal)
+        QPen dot_pen(QColor(0, 200, 255), 1);
+        QBrush dot_brush(QColor(0, 200, 255));
+        float r = 3.0f;
+        for (size_t i = 0; i < planned_path.size(); i++) {
+            QPointF p = toScene(planned_path[i]);
+            plan_items.push_back(
+                scene->addEllipse(p.x()-r, p.y()-r, 2*r, 2*r, dot_pen, dot_brush));
+        }
+    };
+
     // Click on grid view → add waypoint
     struct ClickFilter : QObject {
         QGraphicsView *v;
@@ -614,13 +861,56 @@ int main(int argc, char *argv[]) {
     // Clear button
     QObject::connect(clear_btn, &QPushButton::clicked, [&]() {
         waypoints.clear();
+        planned_path.clear();
         rebuild_wp_items();
+        rebuild_plan_items();
     });
 
-    // Begin navigation
+    // Begin navigation — run A* from current pose through each user waypoint in sequence
     QObject::connect(begin_btn, &QPushButton::clicked, [&]() {
         if (navigator.isRunning() || waypoints.empty()) return;
-        navigator.setWaypoints(waypoints);
+
+        json pp = config.value("planner", json::object());
+        PlannerConfig plan_cfg;
+        plan_cfg.inflation_radius = pp.value("inflation_radius", 0.3f);
+        plan_cfg.allow_unknown    = pp.value("allow_unknown", false);
+
+        float xMin, yMin, cellSize;
+        cv::Mat grid = slam.getOccupancyGrid(xMin, yMin, cellSize);
+
+        std::vector<std::pair<float,float>> path;
+
+        if (grid.empty()) {
+            // No grid available — fall back to straight-line waypoints
+            std::cerr << "[PLAN] No occupancy grid — using direct waypoints\n";
+            path = waypoints;
+        } else {
+            rtabmap::Transform pose = slam.getPose();
+            std::pair<float,float> cur = {pose.x(), pose.z()};
+
+            for (const auto &goal : waypoints) {
+                auto segment = Planner::plan(grid, xMin, yMin, cellSize, cur, goal, plan_cfg);
+                if (segment.empty()) {
+                    std::cerr << "[PLAN] No path to waypoint (" << goal.first
+                              << ", " << goal.second << ") — skipping\n";
+                } else {
+                    // Skip the first point of each segment (it's the previous goal / start)
+                    for (size_t i = path.empty() ? 0 : 1; i < segment.size(); i++)
+                        path.push_back(segment[i]);
+                    cur = goal;
+                }
+            }
+        }
+
+        if (path.empty()) {
+            std::cerr << "[PLAN] No valid path found\n";
+            return;
+        }
+
+        planned_path = path;
+        rebuild_plan_items();
+
+        navigator.setWaypoints(path);
         navigator.start([&slam]() { return slam.getPose(); });
         begin_btn->setEnabled(false);
         stop_btn->setEnabled(true);
@@ -663,7 +953,7 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        // Overlay trajectory and current pose
+        // Overlay trajectory
         {
             std::lock_guard<std::mutex> lock(cloud_mu);
             for (const auto &[tx, ty] : trajectory_xz) {
@@ -672,13 +962,20 @@ int main(int argc, char *argv[]) {
                 if (cx >= 0 && cx < grid.cols && cy >= 0 && cy < grid.rows)
                     img.setPixel(cx, cy, qRgb(255, 50, 255));
             }
-            if (!trajectory_xz.empty()) {
-                int cx = (int)((trajectory_xz.back().first  - xMin) / cellSize);
-                int cy = grid.rows - 1 - (int)((trajectory_xz.back().second - yMin) / cellSize);
-                for (int d = -3; d <= 3; d++) {
-                    if (cx+d >= 0 && cx+d < grid.cols) img.setPixel(cx+d, cy, qRgb(0, 255, 0));
-                    if (cy+d >= 0 && cy+d < grid.rows) img.setPixel(cx, cy+d, qRgb(0, 255, 0));
-                }
+        }
+
+        // Update pose arrow position and orientation
+        {
+            rtabmap::Transform pose = slam.getPose();
+            if (!pose.isNull()) {
+                float px = (pose.x() - xMin) / cellSize;
+                float py = grid.rows - 1 - (pose.y() - yMin) / cellSize;
+                float roll, pitch, yaw;
+                pose.getEulerAngles(roll, pitch, yaw);
+                pose_arrow->setPos(px, py);
+                // Qt rotation is CW in degrees; world yaw is CCW → negate
+                pose_arrow->setRotation(-yaw * 180.0f / M_PI);
+                pose_arrow->setVisible(true);
             }
         }
 
@@ -692,8 +989,9 @@ int main(int argc, char *argv[]) {
             grid_meta = {xMin, yMin, cellSize, grid.rows, grid.cols};
         }
 
-        // Refresh waypoint positions (grid may have grown)
+        // Refresh waypoint/path positions (grid may have grown)
         rebuild_wp_items();
+        rebuild_plan_items();
     });
     grid_timer.start(2000);  // 0.5 Hz — assembly is graph-wide
 

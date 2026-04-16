@@ -58,7 +58,7 @@ static void viamOVDToQuat(double ox, double oy, double oz, double theta_deg,
     qx = result[0]; qy = result[1]; qz = result[2]; qw = result[3];
 }
 
-bool ImuReader::load(const std::string &dir) {
+bool ImuReader::load(const std::string &dir, bool use_orientation) {
     readings_.clear();
 
     if (!fs::is_directory(dir)) {
@@ -103,8 +103,8 @@ bool ImuReader::load(const std::string &dir) {
             r.az = la.value("z", 0.0);
         }
 
-        // Orientation: stored as {"orientation": {"o_x", "o_y", "o_z", "theta"}} in degrees
-        if (data.contains("orientation")) {
+        // Orientation: disabled by default — Viam's frame convention doesn't match RTAB-Map's
+        if (use_orientation && data.contains("orientation")) {
             const auto &o = data["orientation"];
             r.has_orientation = true;
             viamOVDToQuat(
@@ -125,9 +125,39 @@ bool ImuReader::load(const std::string &dir) {
         return a.timestamp_ns < b.timestamp_ns;
     });
 
+    // Merge readings with complementary fields that arrive close together.
+    // Viam data capture stores each SDK method (gyro, accel, orientation) as a
+    // separate file — this re-pairs them into synchronized readings like the
+    // live path does. Stop a group when a duplicate field type is seen (new sample).
+    const uint64_t kMergeWindowNs = 5'000'000; // 5ms — well under the 10ms IMU period
+    std::vector<ImuReading> merged;
+    merged.reserve(readings_.size());
+    for (size_t i = 0; i < readings_.size(); ) {
+        ImuReading m = readings_[i];
+        size_t j = i + 1;
+        while (j < readings_.size() &&
+               readings_[j].timestamp_ns - readings_[i].timestamp_ns <= kMergeWindowNs) {
+            const auto &r = readings_[j];
+            // Stop if this reading duplicates a field we already have — it's a new sample
+            if ((r.has_gyro        && m.has_gyro)        ||
+                (r.has_accel       && m.has_accel)       ||
+                (r.has_orientation && m.has_orientation)) break;
+            if (r.has_gyro)        { m.has_gyro = true;  m.gx = r.gx; m.gy = r.gy; m.gz = r.gz; }
+            if (r.has_accel)       { m.has_accel = true; m.ax = r.ax; m.ay = r.ay; m.az = r.az; }
+            if (r.has_orientation) { m.has_orientation = true; m.qx = r.qx; m.qy = r.qy; m.qz = r.qz; m.qw = r.qw; }
+            j++;
+        }
+        merged.push_back(m);
+        i = j;
+    }
+
+    int paired = 0;
+    for (const auto &r : merged) if (r.has_gyro && r.has_accel) paired++;
+
     std::cout << "[ImuReader] loaded " << loaded << " reading(s) from " << dir;
     if (skipped) std::cout << " (" << skipped << " skipped)";
-    std::cout << "\n";
+    std::cout << " → " << merged.size() << " merged (" << paired << " with gyro+accel)\n";
 
+    readings_ = std::move(merged);
     return !readings_.empty();
 }

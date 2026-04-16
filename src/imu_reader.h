@@ -23,7 +23,9 @@ class ImuReader {
 public:
     // Scans dir for *.json files, parses and sorts by timestamp.
     // Returns false if no files found.
-    bool load(const std::string &dir);
+    // use_orientation: include Viam orientation quaternion — disabled by default because
+    // Viam's OrientationVectorDegrees frame convention doesn't match RTAB-Map's world frame.
+    bool load(const std::string &dir, bool use_orientation = false);
 
     const std::vector<ImuReading> &readings() const { return readings_; }
 

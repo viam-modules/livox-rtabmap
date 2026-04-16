@@ -49,6 +49,10 @@ public:
     // Get the current pose
     rtabmap::Transform getPose() const;
 
+    // Get the trajectory as (x, y) pairs in node-ID order (chronological).
+    // After loadMap(), returns optimized poses. During live/playback, returns odometry poses.
+    std::vector<std::pair<float,float>> getTrajectory() const;
+
     int getMapSize() const;
     int getFrameCount() const { return frame_count_; }
 
@@ -76,7 +80,10 @@ private:
     int frame_count_ = 0;
     std::string db_path_;
 
+    // Guards odom_, rtabmap_, current_pose_, frame_count_
     mutable std::mutex slam_mutex_;
+    // Guards grid_maker_, grid_cache_, occ_grid_, loaded_poses_, last_grid_node_id_
+    mutable std::mutex grid_mutex_;
 
     // Occupancy grid
     rtabmap::LocalGridMaker grid_maker_;
@@ -92,6 +99,10 @@ private:
     float accel_holdoff_ = 1.0; // seconds
     std::atomic<float> current_accel_{0};
     std::atomic<double> last_high_accel_time_{0};
+
+    // Consecutive odometry failure tracking — reset odometry after too many failures
+    int odom_fail_count_ = 0;
+    int odom_fail_reset_threshold_ = 5;
 
     // Sensor → base_link transform (extrinsics)
     rtabmap::Transform lidar_to_base_;

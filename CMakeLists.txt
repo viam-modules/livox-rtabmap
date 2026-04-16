@@ -53,6 +53,7 @@ set(SOURCES
     src/pcd_player.cpp
     src/imu_reader.cpp
     src/navigator.cpp
+    src/planner.cpp
 )
 if(WITH_VIAM)
     list(APPEND SOURCES src/viam_client.cpp)

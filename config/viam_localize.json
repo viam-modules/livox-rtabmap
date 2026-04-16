@@ -8,11 +8,11 @@
     "imu_hz":     100
   },
   "headless": false,
-  "database_path": "hackathon2_3.db",
+  "database_path": "hackathon2_3_post_3.db",
   "use_imu_prior": false,
   "load_map": "largest",
-  "localize_only": false,
-   "extrinsics": {
+  "localize_only": true,
+  "extrinsics": {
     "x": 0.3, "y": 0.45, "z": 0.0,
     "roll": 0.0, "pitch": 0.0, "yaw": 1.5708
   },
@@ -58,7 +58,8 @@
     "max_rotation": 1.2,
     "outlier_ratio": 0.85,
     "f2m_scan_max_size": 15000,
-    "f2m_scan_subtract_radius": 0.03
+    "f2m_scan_subtract_radius": 0.03,
+    "holonomic": true
   },
   "planner": {
     "inflation_radius": 0.3,

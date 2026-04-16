@@ -42,7 +42,8 @@ bool SlamPipeline::init(const json &config) {
     // Kalman filter smooths odometry (0=none, 1=Kalman, 2=Particle)
     params.insert({rtabmap::Parameters::kOdomFilteringStrategy(),
         std::to_string(icp.value("filtering_strategy", 1))});
-    params.insert({rtabmap::Parameters::kOdomGuessMotion(), "true"});
+    params.insert({rtabmap::Parameters::kOdomGuessMotion(),
+        icp.value("guess_motion", false) ? "true" : "false"});
     params.insert({rtabmap::Parameters::kOdomKalmanProcessNoise(),
         std::to_string(icp.value("kalman_process_noise", 0.001))});
     params.insert({rtabmap::Parameters::kOdomKalmanMeasurementNoise(),
@@ -83,6 +84,25 @@ bool SlamPipeline::init(const json &config) {
         std::to_string(icp.value("f2m_scan_max_size", 15000))});
     params.insert({rtabmap::Parameters::kOdomF2MScanSubtractRadius(),
         std::to_string(icp.value("f2m_scan_subtract_radius", 0.03))});
+    // Ground vehicle constraint: restrict odometry to XY plane (no Z drift, no roll/pitch)
+    params.insert({rtabmap::Parameters::kOdomHolonomic(),
+        icp.value("holonomic", true) ? "true" : "false"});
+
+    // Graph optimizer parameters
+    {
+        json opt = config.value("optimizer", json::object());
+        // 0=TORO, 1=g2o, 2=GTSAM — g2o required for robust mode
+        params.insert({rtabmap::Parameters::kOptimizerStrategy(),
+            std::to_string(opt.value("strategy", 1))});
+        params.insert({rtabmap::Parameters::kOptimizerIterations(),
+            std::to_string(opt.value("iterations", 100))});
+        // Robust kernel down-weights bad loop closures instead of letting them warp the map
+        params.insert({rtabmap::Parameters::kOptimizerRobust(),
+            opt.value("robust", true) ? "true" : "false"});
+        // Re-run ICP on every consecutive node pair during refineLinks() to correct odometry drift
+        params.insert({rtabmap::Parameters::kRGBDNeighborLinkRefining(),
+            opt.value("neighbor_link_refining", false) ? "true" : "false"});
+    }
 
     // RTAB-Map parameters from config
     params.insert({rtabmap::Parameters::kRtabmapDetectionRate(),
@@ -109,6 +129,7 @@ bool SlamPipeline::init(const json &config) {
     max_range_ = config.value("max_range", 0.0f);
     max_accel_ = config.value("max_accel", 0.0f);
     accel_holdoff_ = config.value("accel_holdoff", 1.0f);
+    odom_fail_reset_threshold_ = config.value("odom_fail_reset_threshold", 2);
 
     // Sensor → base_link extrinsic transform
     {
@@ -168,7 +189,6 @@ bool SlamPipeline::init(const json &config) {
 
 bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t timestamp_ns,
                                 pcl::PointCloud<pcl::PointXYZI>::Ptr *filtered_cloud) {
-    std::lock_guard<std::mutex> lock(slam_mutex_);
     if (!odom_ || !rtabmap_) return false;
 
     if (max_accel_ > 0) {
@@ -205,33 +225,60 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
     rtabmap::LaserScan scan = rtabmap::util3d::laserScanFromPointCloud(*xyzi_filtered, lidar_to_base_);
     rtabmap::SensorData data(scan, cv::Mat(), cv::Mat(), rtabmap::CameraModel(), 0, stamp);
 
-    rtabmap::OdometryInfo odom_info;
-    rtabmap::Transform pose = odom_->process(data, &odom_info);
+    rtabmap::Transform pose;
+    int nodeId = -1;
+    {
+        std::lock_guard<std::mutex> lock(slam_mutex_);
 
-    if (pose.isNull()) {
-        std::cerr << "[SLAM] Odometry failed on frame " << frame_count_ << "\n";
-        return false;
-    }
+        rtabmap::OdometryInfo odom_info;
+        pose = odom_->process(data, &odom_info);
 
-    current_pose_ = pose;
-    frame_count_++;
+        if (pose.isNull()) {
+            odom_fail_count_++;
+            std::cerr << "[SLAM] Odometry failed on frame " << frame_count_
+                      << " (consecutive: " << odom_fail_count_ << ")"
+                      << " icp_ratio=" << odom_info.reg.icpInliersRatio
+                      << " corr=" << odom_info.reg.icpCorrespondences
+                      << " rms=" << odom_info.reg.icpRMS;
+            if (!odom_info.reg.rejectedMsg.empty())
+                std::cerr << " [" << odom_info.reg.rejectedMsg << "]";
+            std::cerr << "\n";
+            if (odom_fail_count_ >= odom_fail_reset_threshold_) {
+                std::cerr << "[SLAM] Resetting odometry after " << odom_fail_count_ << " failures\n";
+                odom_->reset();
+                odom_fail_count_ = 0;
+            }
+            return false;
+        }
+        odom_fail_count_ = 0;
 
-    rtabmap_->process(data, pose);
+        current_pose_ = pose;
+        frame_count_++;
 
-    // Add local occupancy grid for this node if a new node was created
-    int nodeId = rtabmap_->getLastLocationId();
-    if (nodeId > 0 && nodeId != last_grid_node_id_) {
-        last_grid_node_id_ = nodeId;
-        cv::Mat ground, obstacles, empty;
-        cv::Point3f viewPoint(0, 0, 0);
-        grid_maker_.createLocalMap(scan, pose, ground, obstacles, empty, viewPoint);
-        grid_cache_.add(nodeId, ground, obstacles, empty,
-                        grid_maker_.getCellSize(), viewPoint);
-    }
+        rtabmap_->process(data, pose);
+        nodeId = rtabmap_->getLastLocationId();
 
-    if (frame_count_ % 10 == 0) {
-        std::cout << "[SLAM] Frame " << frame_count_
-                  << " | pose: " << pose.prettyPrint() << "\n";
+        if (frame_count_ % 10 == 0) {
+            std::cout << "[SLAM] Frame " << frame_count_
+                      << " | pose: " << pose.prettyPrint()
+                      << " | icp_ratio=" << std::fixed << std::setprecision(2)
+                      << odom_info.reg.icpInliersRatio
+                      << " corr=" << odom_info.reg.icpCorrespondences
+                      << " rms=" << std::setprecision(4) << odom_info.reg.icpRMS << "\n";
+        }
+    } // slam_mutex_ released
+
+    // Add local occupancy grid tile — grid_mutex_ only, slam_mutex_ no longer held
+    if (nodeId > 0) {
+        std::lock_guard<std::mutex> glock(grid_mutex_);
+        if (nodeId != last_grid_node_id_) {
+            last_grid_node_id_ = nodeId;
+            cv::Mat ground, obstacles, empty;
+            cv::Point3f viewPoint(0, 0, 0);
+            grid_maker_.createLocalMap(scan, pose, ground, obstacles, empty, viewPoint);
+            grid_cache_.add(nodeId, ground, obstacles, empty,
+                            grid_maker_.getCellSize(), viewPoint);
+        }
     }
 
     return true;
@@ -264,9 +311,12 @@ void SlamPipeline::processImu(const ImuReading &imu) {
     cv::Mat cov3 = cv::Mat::eye(3, 3, CV_64FC1) * 1e-3;
     cv::Mat cov3_large = cv::Mat::eye(3, 3, CV_64FC1) * 9999.0;
 
+    // Don't pass orientation to RTAB-Map — Viam's orientation frame convention
+    // doesn't reliably match RTAB-Map's expected world frame (ENU), causing the
+    // entire map to rotate. Gyro+accel integration is sufficient for motion prior.
     rtabmap::IMU rtImu(
         last_orientation_,
-        has_orientation_ ? cov3 : cov3_large,
+        cov3_large,  // always ignore absolute orientation
         last_gyro_,
         has_gyro_ ? cov3 : cov3_large,
         last_accel_,
@@ -283,6 +333,16 @@ void SlamPipeline::processImu(const ImuReading &imu) {
 rtabmap::Transform SlamPipeline::getPose() const {
     std::lock_guard<std::mutex> lock(slam_mutex_);
     return current_pose_;
+}
+
+std::vector<std::pair<float,float>> SlamPipeline::getTrajectory() const {
+    std::lock_guard<std::mutex> lock(grid_mutex_);
+    std::vector<std::pair<float,float>> traj;
+    traj.reserve(loaded_poses_.size());
+    for (const auto &[id, pose] : loaded_poses_) {
+        traj.push_back({pose.x(), pose.y()});
+    }
+    return traj;
 }
 
 int SlamPipeline::getMapSize() const {
@@ -306,19 +366,25 @@ void SlamPipeline::processIMU(float gyro_x, float gyro_y, float gyro_z,
 }
 
 cv::Mat SlamPipeline::getOccupancyGrid(float &xMin, float &yMin, float &cellSize) {
-    std::lock_guard<std::mutex> lock(slam_mutex_);
-    if (!rtabmap_ || !occ_grid_) return cv::Mat();
-
-    // Start with loaded map poses so previously mapped areas are always visible
-    std::map<int, rtabmap::Transform> poses = loaded_poses_;
-
-    // Overlay current session poses from getGraph (these may update loaded nodes too)
+    // Snapshot current session poses under slam_mutex_ only
     std::map<int, rtabmap::Transform> current_poses;
-    std::multimap<int, rtabmap::Link> constraints;
-    rtabmap_->getGraph(current_poses, constraints, /*optimized=*/false, /*global=*/true);
-    for (auto &[id, p] : current_poses) {
-        poses[id] = p;
-    }
+    {
+        std::lock_guard<std::mutex> lock(slam_mutex_);
+        if (!rtabmap_) return cv::Mat();
+        std::multimap<int, rtabmap::Link> constraints;
+        rtabmap_->getGraph(current_poses, constraints, /*optimized=*/true, /*global=*/true);
+        if (current_poses.empty()) {
+            rtabmap_->getGraph(current_poses, constraints, /*optimized=*/false, /*global=*/true);
+        }
+    } // slam_mutex_ released
+
+    // Assemble and update grid under grid_mutex_ only
+    std::lock_guard<std::mutex> glock(grid_mutex_);
+    if (!occ_grid_) return cv::Mat();
+
+    // Start with loaded map poses, overlay current session on top
+    std::map<int, rtabmap::Transform> poses = loaded_poses_;
+    for (auto &[id, p] : current_poses) poses[id] = p;
 
     occ_grid_->update(poses);
     cv::Mat result = occ_grid_->getMap(xMin, yMin);
@@ -338,15 +404,25 @@ cv::Mat SlamPipeline::getOccupancyGrid(float &xMin, float &yMin, float &cellSize
 pcl::PointCloud<pcl::PointXYZI>::Ptr SlamPipeline::loadMap(int map_id) {
     auto map = pcl::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
     if (!rtabmap_) return map;
-    std::lock_guard<std::mutex> lock(slam_mutex_);
 
+    // Snapshot the database under slam_mutex_ only
     std::map<int, rtabmap::Signature> signatures;
     std::map<int, rtabmap::Transform> poses;
-    std::multimap<int, rtabmap::Link> constraints;
-    rtabmap_->get3DMap(signatures, poses, constraints, false, true);
+    {
+        std::lock_guard<std::mutex> lock(slam_mutex_);
+        std::multimap<int, rtabmap::Link> constraints;
+        // Prefer optimized poses; fall back to raw
+        rtabmap_->get3DMap(signatures, poses, constraints, true, true);
+        if (poses.empty()) {
+            rtabmap_->get3DMap(signatures, poses, constraints, false, true);
+            std::cout << "[SLAM] Using raw odometry poses (no saved optimization found)\n";
+        } else {
+            std::cout << "[SLAM] Using optimized poses (" << poses.size() << " nodes)\n";
+        }
+    } // slam_mutex_ released
 
-    // --- Pass 1: rebuild display point cloud and collect poses ---
-    loaded_poses_.clear();
+    // --- Pass 1: build display point cloud (no locks needed — local work) ---
+    std::map<int, rtabmap::Transform> new_loaded_poses;
     int included = 0;
     for (auto &[id, sig] : signatures) {
         rtabmap::Transform pose = poses.count(id) ? poses.at(id) : sig.getPose();
@@ -359,7 +435,7 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr SlamPipeline::loadMap(int map_id) {
         }
         if (scan.isEmpty()) continue;
 
-        loaded_poses_[id] = pose;
+        new_loaded_poses[id] = pose;
 
         pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = rtabmap::util3d::laserScanToPointCloud(scan, pose);
         for (const auto &p : *cloud) {
@@ -378,32 +454,44 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr SlamPipeline::loadMap(int map_id) {
               << (map_id >= 0 ? " (map " + std::to_string(map_id) + ")" : " (all sessions)")
               << "\n";
 
-    // --- Pass 2: populate occupancy grid cache (best-effort) ---
-    int grid_nodes = 0;
-    for (auto &[id, sig] : signatures) {
-        rtabmap::Transform pose = poses.count(id) ? poses.at(id) : sig.getPose();
-        if (pose.isNull()) continue;
-        if (map_id >= 0 && sig.mapId() != map_id) continue;
-        if (grid_cache_.find(id) != grid_cache_.end()) continue;
+    // --- Pass 2: populate grid cache and assemble grid under grid_mutex_ only ---
+    {
+        std::lock_guard<std::mutex> glock(grid_mutex_);
+        loaded_poses_ = std::move(new_loaded_poses);
 
-        rtabmap::LaserScan scan = sig.sensorData().laserScanRaw();
-        if (scan.isEmpty()) {
-            sig.sensorData().uncompressData(nullptr, nullptr, &scan);
-        }
-        if (scan.isEmpty()) continue;
+        int grid_nodes = 0;
+        for (auto &[id, sig] : signatures) {
+            rtabmap::Transform pose = poses.count(id) ? poses.at(id) : sig.getPose();
+            if (pose.isNull()) continue;
+            if (map_id >= 0 && sig.mapId() != map_id) continue;
+            if (grid_cache_.find(id) != grid_cache_.end()) continue;
 
-        try {
-            cv::Mat ground, obstacles, empty;
-            cv::Point3f viewPoint(0, 0, 0);
-            grid_maker_.createLocalMap(scan, pose, ground, obstacles, empty, viewPoint);
-            grid_cache_.add(id, ground, obstacles, empty, grid_maker_.getCellSize(), viewPoint);
-            last_grid_node_id_ = id;
-            grid_nodes++;
-        } catch (const std::exception &e) {
-            std::cerr << "[SLAM] Grid cache skipped node " << id << ": " << e.what() << "\n";
+            rtabmap::LaserScan scan = sig.sensorData().laserScanRaw();
+            if (scan.isEmpty()) {
+                sig.sensorData().uncompressData(nullptr, nullptr, &scan);
+            }
+            if (scan.isEmpty()) continue;
+
+            try {
+                cv::Mat ground, obstacles, empty;
+                cv::Point3f viewPoint(0, 0, 0);
+                grid_maker_.createLocalMap(scan, pose, ground, obstacles, empty, viewPoint);
+                grid_cache_.add(id, ground, obstacles, empty, grid_maker_.getCellSize(), viewPoint);
+                last_grid_node_id_ = id;
+                grid_nodes++;
+            } catch (const std::exception &e) {
+                std::cerr << "[SLAM] Grid cache skipped node " << id << ": " << e.what() << "\n";
+            }
         }
-    }
-    std::cout << "[SLAM] Grid cache populated: " << grid_nodes << " nodes\n";
+        std::cout << "[SLAM] Grid cache populated: " << grid_nodes << " nodes\n";
+
+        if (!loaded_poses_.empty()) {
+            std::cout << "[SLAM] Pre-assembling occupancy grid...\n";
+            occ_grid_->update(loaded_poses_);
+            std::cout << "[SLAM] Occupancy grid ready\n";
+        }
+    } // grid_mutex_ released
+
     return map;
 }
 

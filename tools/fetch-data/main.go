@@ -167,11 +167,13 @@ func main() {
 	}
 }
 
-// collectBinaryMetadata pages through BinaryDataByFilter (no binary payload) and returns IDs + stub entries.
-// Records whose TimeRequested falls outside [start, end] are skipped with a warning.
-func collectBinaryMetadata(ctx context.Context, dc *app.DataClient, filter *app.Filter, start, end time.Time, logger logging.Logger) ([]string, []ManifestEntry) {
-	var ids []string
-	var entries []ManifestEntry
+// collectBinaryMetadata pages through BinaryDataByFilter (no binary payload).
+// Files already present in outDir are returned as cachedEntries (no download needed).
+// Files that need downloading are returned as ids + downloadEntries (1:1 correspondence).
+// Records outside [start, end] are skipped with a warning.
+func collectBinaryMetadata(ctx context.Context, dc *app.DataClient, filter *app.Filter,
+	outDir, dataType string, start, end time.Time, logger logging.Logger,
+) (ids []string, downloadEntries []ManifestEntry, cachedEntries []ManifestEntry) {
 	var last string
 	skipped := 0
 
@@ -193,21 +195,32 @@ func collectBinaryMetadata(ctx context.Context, dc *app.DataClient, filter *app.
 				continue
 			}
 
-			ids = append(ids, d.Metadata.BinaryDataID)
-
 			var component string
 			var tags []string
 			if d.Metadata != nil {
 				component = d.Metadata.CaptureMetadata.ComponentName
 				tags = d.Metadata.CaptureMetadata.Tags
 			}
+			if component == "" {
+				component = "lidar"
+			}
 
-			entries = append(entries, ManifestEntry{
+			filename := fmt.Sprintf("%d_%s.pcd", t.UnixNano(), component)
+			entry := ManifestEntry{
+				Filename:      filename,
 				ComponentName: component,
 				TimeRequested: t,
 				TimestampNs:   t.UnixNano(),
 				Tags:          tags,
-			})
+				DataType:      dataType,
+			}
+
+			if _, err := os.Stat(filepath.Join(outDir, filename)); err == nil {
+				cachedEntries = append(cachedEntries, entry)
+			} else {
+				ids = append(ids, d.Metadata.BinaryDataID)
+				downloadEntries = append(downloadEntries, entry)
+			}
 		}
 
 		last = resp.Last
@@ -219,14 +232,20 @@ func collectBinaryMetadata(ctx context.Context, dc *app.DataClient, filter *app.
 		fmt.Fprintf(os.Stderr, "  warning: skipped %d record(s) outside [%s, %s]\n",
 			skipped, start.Format(time.RFC3339), end.Format(time.RFC3339))
 	}
-	return ids, entries
+	return
 }
 
 // downloadBinaryData fetches binary files in parallel, writes them to outDir, returns manifest entries.
 func downloadBinaryData(ctx context.Context, dc *app.DataClient, filter *app.Filter, outDir, dataType string, start, end time.Time, numWorkers int, logger logging.Logger) []ManifestEntry {
-	ids, entries := collectBinaryMetadata(ctx, dc, filter, start, end, logger)
-	if len(ids) == 0 {
+	ids, downloadEntries, cachedEntries := collectBinaryMetadata(ctx, dc, filter, outDir, dataType, start, end, logger)
+
+	total := len(ids) + len(cachedEntries)
+	if total == 0 {
 		return nil
+	}
+	if len(ids) == 0 {
+		fmt.Printf("  %d/%d already cached\n", len(cachedEntries), total)
+		return cachedEntries
 	}
 
 	const batchSize = 50
@@ -236,7 +255,6 @@ func downloadBinaryData(ctx context.Context, dc *app.DataClient, filter *app.Fil
 		ids      []string
 	}
 
-	// Build batch list
 	var batches []batch
 	for i := 0; i < len(ids); i += batchSize {
 		end := i + batchSize
@@ -246,30 +264,31 @@ func downloadBinaryData(ctx context.Context, dc *app.DataClient, filter *app.Fil
 		batches = append(batches, batch{i, ids[i:end]})
 	}
 
-	total := len(ids)
 	var done atomic.Int64
-	var cached atomic.Int64
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, numWorkers)
 	startTime := time.Now()
 
+	nCached := len(cachedEntries)
+	nDownload := len(ids)
+
 	printProgress := func() {
-		n := done.Load()
-		c := cached.Load()
+		n := int(done.Load()) + nCached
 		elapsed := time.Since(startTime).Round(time.Second)
-		pct := int(n * 100 / int64(total))
+		pct := n * 100 / total
 		width := 30
-		filled := width * int(n) / total
+		filled := width * n / total
 		bar := strings.Repeat("#", filled) + strings.Repeat(".", width-filled)
 		eta := ""
-		if n > 0 && n < int64(total) {
-			remaining := time.Duration(float64(elapsed) * float64(int64(total)-n) / float64(n))
+		nd := int(done.Load())
+		if nd > 0 && nd < nDownload {
+			remaining := time.Duration(float64(elapsed) * float64(nDownload-nd) / float64(nd))
 			eta = fmt.Sprintf(" | eta %s", remaining.Round(time.Second))
 		}
 		cached_str := ""
-		if c > 0 {
-			cached_str = fmt.Sprintf(" (%d cached)", c)
+		if nCached > 0 {
+			cached_str = fmt.Sprintf(" (%d cached)", nCached)
 		}
 		fmt.Printf("\r  [%s] %d/%d%s  %d%%%s%s  ", bar, n, total, cached_str, pct, eta, strings.Repeat(" ", 10))
 	}
@@ -287,30 +306,14 @@ func downloadBinaryData(ctx context.Context, dc *app.DataClient, filter *app.Fil
 				return
 			}
 
-			for j, d := range results {
+			for j := range results {
 				idx := b.startIdx + j
-				component := entries[idx].ComponentName
-				if component == "" {
-					component = "lidar"
-				}
-				filename := fmt.Sprintf("%d_%s.pcd", d.Metadata.TimeRequested.UnixNano(), component)
-				dest := filepath.Join(outDir, filename)
-
-				if _, err := os.Stat(dest); err == nil {
-					cached.Add(1)
-				} else if err := os.WriteFile(dest, d.Binary, 0o644); err != nil {
+				dest := filepath.Join(outDir, downloadEntries[idx].Filename)
+				if err := os.WriteFile(dest, results[j].Binary, 0o644); err != nil {
 					logger.Errorf("failed to write %s: %v", dest, err)
-					done.Add(1)
-					mu.Lock()
-					printProgress()
-					mu.Unlock()
-					continue
 				}
-
 				done.Add(1)
 				mu.Lock()
-				entries[idx].Filename = filename
-				entries[idx].DataType = dataType
 				printProgress()
 				mu.Unlock()
 			}
@@ -319,28 +322,98 @@ func downloadBinaryData(ctx context.Context, dc *app.DataClient, filter *app.Fil
 
 	wg.Wait()
 	elapsed := time.Since(startTime).Round(time.Millisecond)
-	c := cached.Load()
 	cached_str := ""
-	if c > 0 {
-		cached_str = fmt.Sprintf(" (%d cached)", c)
+	if nCached > 0 {
+		cached_str = fmt.Sprintf(" (%d cached)", nCached)
 	}
 	fmt.Printf("\r  [%s] %d/%d%s  done in %s%s\n",
 		strings.Repeat("#", 30), total, total, cached_str, elapsed, strings.Repeat(" ", 20))
-	return entries
+	return append(cachedEntries, downloadEntries...)
 }
 
 // downloadTabularData fetches tabular sensor data (e.g. IMU) and saves each record as a JSON file.
 // Records whose TimeRequested falls outside [start, end] are skipped with a warning.
 func downloadTabularData(ctx context.Context, dc *app.DataClient, filter *app.Filter, outDir string, start, end time.Time, logger logging.Logger) []ManifestEntry {
-	var entries []ManifestEntry
-	var last string
-	skipped := 0
+	// One lightweight count-only request to get the total so we can show a progress bar.
+	countResp, err := dc.TabularDataByFilter(ctx, &app.DataByFilterOptions{
+		Filter:    filter,
+		CountOnly: true,
+	})
+	total := 0
+	if err != nil {
+		logger.Warnf("could not get tabular record count: %v — progress %% unavailable", err)
+	} else {
+		total = countResp.Count
+	}
+
+	type writeJob struct {
+		filename string
+		entry    ManifestEntry
+		raw      []byte
+	}
+
+	const numWriters = 8
+	jobs := make(chan writeJob, numWriters*4)
+
+	var done atomic.Int64
+	var cached atomic.Int64
+	var mu sync.Mutex
+	var allEntries []ManifestEntry
 	startTime := time.Now()
 
+	printProgress := func() {
+		n := int(done.Load())
+		elapsed := time.Since(startTime).Round(time.Second)
+		c := int(cached.Load())
+		cachedStr := ""
+		if c > 0 {
+			cachedStr = fmt.Sprintf(" (%d cached)", c)
+		}
+		if total > 0 {
+			pct := n * 100 / total
+			width := 30
+			filled := width * n / total
+			bar := strings.Repeat("#", filled) + strings.Repeat(".", width-filled)
+			eta := ""
+			if n > 0 && n < total {
+				remaining := time.Duration(float64(elapsed) * float64(total-n) / float64(n))
+				eta = fmt.Sprintf(" | eta %s", remaining.Round(time.Second))
+			}
+			fmt.Printf("\r  [%s] %d/%d%s  %d%%%s%s  ", bar, n, total, cachedStr, pct, eta, strings.Repeat(" ", 10))
+		} else {
+			fmt.Printf("\r  fetched %d records%s | %s elapsed%s", n, cachedStr, elapsed, strings.Repeat(" ", 10))
+		}
+	}
+
+	// Writer pool: marshal+write in parallel while the main goroutine fetches pages.
+	var wg sync.WaitGroup
+	for i := 0; i < numWriters; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				if _, err := os.Stat(filepath.Join(outDir, job.filename)); err == nil {
+					cached.Add(1)
+				} else if err := os.WriteFile(filepath.Join(outDir, job.filename), job.raw, 0o644); err != nil {
+					logger.Errorf("failed to write %s: %v", job.filename, err)
+				}
+				done.Add(1)
+				mu.Lock()
+				allEntries = append(allEntries, job.entry)
+				printProgress()
+				mu.Unlock()
+			}
+		}()
+	}
+
+	// Main goroutine: fetch pages sequentially (cursor-based, can't parallelise),
+	// send each record to the writer pool.
+	var last string
+	skipped := 0
 	for {
 		resp, err := dc.TabularDataByFilter(ctx, &app.DataByFilterOptions{
 			Filter: filter,
-			Limit:  100,
+			Limit:  1000,
 			Last:   last,
 		})
 		if err != nil {
@@ -365,11 +438,7 @@ func downloadTabularData(ctx context.Context, dc *app.DataClient, filter *app.Fi
 				component = "imu"
 			}
 
-			// Include method in filename to avoid collisions when multiple
-			// measurement types share the same millisecond timestamp.
 			filename := fmt.Sprintf("%d_%s_%s.json", d.TimeRequested.UnixNano(), component, method)
-			dest := filepath.Join(outDir, filename)
-
 			raw, err := json.Marshal(map[string]interface{}{
 				"time_requested": d.TimeRequested,
 				"time_received":  d.TimeReceived,
@@ -381,38 +450,48 @@ func downloadTabularData(ctx context.Context, dc *app.DataClient, filter *app.Fi
 				logger.Errorf("failed to marshal record %s: %v", filename, err)
 				continue
 			}
-			if err := os.WriteFile(dest, raw, 0o644); err != nil {
-				logger.Errorf("failed to write %s: %v", dest, err)
-				continue
+			jobs <- writeJob{
+				filename: filename,
+				raw:      raw,
+				entry: ManifestEntry{
+					Filename:      filename,
+					TimestampNs:   d.TimeRequested.UnixNano(),
+					ComponentName: component,
+					TimeRequested: d.TimeRequested,
+					Tags:          tags,
+					DataType:      "imu",
+				},
 			}
-
-			entries = append(entries, ManifestEntry{
-				Filename:      filename,
-				TimestampNs:   d.TimeRequested.UnixNano(),
-				ComponentName: component,
-				TimeRequested: d.TimeRequested,
-				Tags:          tags,
-				DataType:      "imu",
-			})
 		}
-
-		fmt.Printf("\r  fetched %d IMU records | %s elapsed%s",
-			len(entries), time.Since(startTime).Round(time.Second), strings.Repeat(" ", 10))
 
 		last = resp.Last
 		if len(resp.TabularData) == 0 || last == "" {
 			break
 		}
 	}
+	close(jobs)
+	wg.Wait()
 
-	fmt.Printf("\r  fetched %d IMU records in %s%s\n",
-		len(entries), time.Since(startTime).Round(time.Millisecond), strings.Repeat(" ", 10))
+	elapsed := time.Since(startTime).Round(time.Millisecond)
+	n := int(done.Load())
+	c := int(cached.Load())
+	cachedStr := ""
+	if c > 0 {
+		cachedStr = fmt.Sprintf(" (%d cached)", c)
+	}
+	if total > 0 {
+		fmt.Printf("\r  [%s] %d/%d%s  done in %s%s\n",
+			strings.Repeat("#", 30), n, total, cachedStr, elapsed, strings.Repeat(" ", 20))
+	} else {
+		fmt.Printf("\r  fetched %d IMU records%s in %s%s\n",
+			n, cachedStr, elapsed, strings.Repeat(" ", 20))
+	}
 
 	if skipped > 0 {
 		fmt.Fprintf(os.Stderr, "  warning: skipped %d IMU record(s) outside [%s, %s]\n",
 			skipped, start.Format(time.RFC3339), end.Format(time.RFC3339))
 	}
-	return entries
+	return allEntries
 }
 
 // parseDuration extends time.ParseDuration to support "d" for days (e.g. "7d", "2d12h").
