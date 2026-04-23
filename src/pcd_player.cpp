@@ -61,8 +61,8 @@ bool PcdPlayer::load(const std::string &dir) {
     return true;
 }
 
-bool PcdPlayer::loadImu(const std::string &dir) {
-    return imu_reader_.load(dir);
+bool PcdPlayer::loadImu(const std::string &dir, bool use_orientation) {
+    return imu_reader_.load(dir, use_orientation);
 }
 
 void PcdPlayer::play(FrameCallback pcdCb, ImuCallback imuCb, int delay_ms) {

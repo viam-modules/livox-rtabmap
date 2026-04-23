@@ -23,7 +23,7 @@ public:
 
     // Optionally load IMU data to interleave during playback.
     // Returns false if no IMU files found (non-fatal — playback still works).
-    bool loadImu(const std::string &dir);
+    bool loadImu(const std::string &dir, bool use_orientation = false);
 
     int frameCount() const { return static_cast<int>(files_.size()); }
 
