@@ -11,6 +11,8 @@
 #include <vector>
 
 #include <QApplication>
+#include <QSurfaceFormat>
+#include <QVTKOpenGLNativeWidget.h>
 #include <QGraphicsScene>
 #include <QGraphicsView>
 #include <QGraphicsPixmapItem>
@@ -82,6 +84,12 @@ int main(int argc, char *argv[]) {
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
 
+    // VTK's QVTKOpenGLNativeWidget (used by rtabmap::CloudViewer) requires
+    // the default surface format to be set before QApplication — otherwise
+    // the OpenGL context lacks VAO support and the first paint dereferences
+    // a null GL function pointer (crashes on macOS).
+    QSurfaceFormat::setDefaultFormat(QVTKOpenGLNativeWidget::defaultFormat());
+
     std::string config_path = "config/default.json";
     if (argc > 1 && argv[1][0] != '-') {
         config_path = argv[1];
@@ -106,6 +114,7 @@ int main(int argc, char *argv[]) {
     std::string color_mode = config.value("color_mode", "intensity");
     bool show_trajectory = config.value("show_trajectory", true);
     int map_add_interval = config.value("map_add_interval", 1);
+    bool add_scans_to_map = config.value("add_scans_to_map", true);
 
     auto map_color_arr = config.value("map_color", std::vector<int>{180, 180, 180});
     auto scan_color_arr = config.value("scan_color", std::vector<int>{0, 255, 0});
@@ -662,6 +671,7 @@ int main(int argc, char *argv[]) {
             if (!rf) return;
             json new_config = json::parse(rf);
             map_add_interval = new_config.value("map_add_interval", map_add_interval);
+            add_scans_to_map = new_config.value("add_scans_to_map", add_scans_to_map);
             map_voxel = new_config.value("map_voxel_size", map_voxel);
             downsample_interval = new_config.value("map_downsample_interval", downsample_interval);
             color_mode = new_config.value("color_mode", color_mode);
@@ -1004,8 +1014,8 @@ int main(int argc, char *argv[]) {
 
         max_frame_id = frame_count;
 
-        // Transform and accumulate points (only every map_add_interval frames)
-        bool add_to_map = (map_add_interval <= 1) || (frame_count % map_add_interval == 0);
+        // Transform and accumulate points (only every map_add_interval frames, and only if enabled)
+        bool add_to_map = add_scans_to_map && ((map_add_interval <= 1) || (frame_count % map_add_interval == 0));
         if (add_to_map) for (const auto &p : *latest_cloud) {
             float x = p.x, y = p.y, z = p.z;
             const float *d = latest_pose.data();

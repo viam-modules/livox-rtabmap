@@ -1,8 +1,20 @@
 BUILD_DIR   := build
 CONFIG      := config/default.json
 VIAM_CONFIG := config/viam.json
-J           := $(shell nproc)
 ENV_FILE    ?=
+
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+    J             ?= $(shell sysctl -n hw.ncpu)
+    BREW_PREFIX   := $(shell brew --prefix)
+    # Homebrew's rtabmap is built against Qt6 (keg `qtbase`); qt@5 is keg-only.
+    # Point cmake at both so find_package(Qt6/Qt5) succeeds regardless.
+    CMAKE_PREFIX  := $(BREW_PREFIX);$(BREW_PREFIX)/opt/qtbase;$(BREW_PREFIX)/opt/qt@5
+    CMAKE_FLAGS   := -DCMAKE_PREFIX_PATH="$(CMAKE_PREFIX)"
+else
+    J             ?= $(shell nproc)
+    CMAKE_FLAGS   :=
+endif
 
 .PHONY: all build viam setup setup-viam run run-viam clean rebuild help
 
@@ -14,13 +26,13 @@ build: $(BUILD_DIR)/Makefile
 	cmake --build $(BUILD_DIR) -j$(J)
 
 viam: $(BUILD_DIR)/Makefile
-	cmake $(BUILD_DIR) -DWITH_VIAM=ON
+	cmake -B $(BUILD_DIR) -S . $(CMAKE_FLAGS) -DWITH_VIAM=ON
 	cmake --build $(BUILD_DIR) -j$(J)
 
 $(BUILD_DIR)/Makefile:
 	mkdir -p $(BUILD_DIR)
 	git submodule update --init
-	cmake -B $(BUILD_DIR) -S .
+	cmake -B $(BUILD_DIR) -S . $(CMAKE_FLAGS)
 
 # ── Run ────────────────────────────────────────────────────────────────────────
 
@@ -31,6 +43,16 @@ run-viam: viam
 	$(if $(ENV_FILE),set -a && . $(ENV_FILE) && set +a &&,) ./$(BUILD_DIR)/livox_rtabmap $(VIAM_CONFIG)
 
 # ── Setup (system deps + rtabmap from source) ──────────────────────────────────
+
+ifeq ($(UNAME_S),Darwin)
+
+setup:
+	brew install cmake rtabmap pcl nlohmann-json qt@5
+
+setup-viam:
+	brew install abseil boost grpc protobuf openssl@3 re2 eigen ninja xtensor
+
+else
 
 setup:
 	sudo apt install -y \
@@ -62,6 +84,8 @@ setup-viam:
 	    sudo cmake --install /tmp/rtabmap/build; \
 	    sudo ldconfig; \
 	fi
+
+endif
 
 # ── Misc ───────────────────────────────────────────────────────────────────────
 
