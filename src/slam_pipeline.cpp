@@ -114,8 +114,10 @@ bool SlamPipeline::init(const json &config) {
     params.insert({rtabmap::Parameters::kRGBDAngularUpdate(),
         std::to_string(rtab.value("angular_update", 0.1))});
     // Localization-only mode: match against existing map, don't add new nodes
+    // and open the database read-only so the file isn't modified on exit.
     if (config.value("localize_only", false)) {
         params.insert({rtabmap::Parameters::kMemIncrementalMemory(), "false"});
+        params.insert({rtabmap::Parameters::kMemLocalizationReadOnly(), "true"});
     }
 
     odom_.reset(rtabmap::Odometry::create(params));
