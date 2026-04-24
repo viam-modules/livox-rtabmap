@@ -10,6 +10,7 @@
 
 #include <pcl/io/pcd_io.h>
 
+#include <viam/sdk/components/base.hpp>
 #include <viam/sdk/components/camera.hpp>
 #include <viam/sdk/components/movement_sensor.hpp>
 #include <viam/sdk/robot/client.hpp>
@@ -158,6 +159,45 @@ void ViamClient::imuLoop() {
         }
 
         std::this_thread::sleep_until(t0 + interval);
+    }
+}
+
+bool ViamClient::baseReconnect() {
+    try {
+        base_machine_ = connect(cfg_);
+        base_ = base_machine_->resource_by_name<Base>(cfg_.base_name);
+        return true;
+    } catch (const std::exception &e) {
+        std::cerr << "[VIAM] base reconnect failed: " << e.what() << "\n";
+        return false;
+    }
+}
+
+void ViamClient::sendBaseVelocity(float linear_mps, float angular_rps) {
+    if (cfg_.base_name.empty()) return;
+
+    // set_velocity takes mm/s (linear) and deg/s (angular).
+    // Forward motion is linear Y; rotation is angular Z.
+    Vector3 linear_vec{};
+    linear_vec.set_y(static_cast<double>(linear_mps) * 1000.0);
+    Vector3 angular_vec{};
+    angular_vec.set_z(static_cast<double>(angular_rps) * (180.0 / M_PI));
+
+    std::lock_guard<std::mutex> lock(base_mu_);
+    if (!base_ && !baseReconnect()) return;
+
+    try {
+        base_->set_velocity(linear_vec, angular_vec);
+    } catch (const std::exception &e) {
+        std::cerr << "[VIAM] set_velocity failed: " << e.what() << " — reconnecting\n";
+        base_.reset();
+        base_machine_.reset();
+        if (baseReconnect()) {
+            try { base_->set_velocity(linear_vec, angular_vec); }
+            catch (const std::exception &e2) {
+                std::cerr << "[VIAM] set_velocity retry failed: " << e2.what() << "\n";
+            }
+        }
     }
 }
 

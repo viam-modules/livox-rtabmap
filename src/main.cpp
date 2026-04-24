@@ -546,6 +546,7 @@ int main(int argc, char *argv[]) {
     // Build data source start/stop for live modes (Livox or Viam)
     std::function<bool(FrameCallback, IMUCallback)> source_start;
     std::function<void()> source_stop;
+    std::function<void(float, float)> nav_vel_cb; // set below if Viam base is configured
 
     if (data_source == "viam") {
 #ifdef HAVE_VIAM_SDK
@@ -564,11 +565,15 @@ int main(int argc, char *argv[]) {
         vcfg.api_key_id  = from_env("VIAM_API_KEY_ID", vc.value("api_key_id", ""));
         vcfg.lidar_name  = vc.value("lidar_name", "");
         vcfg.imu_name    = vc.value("imu_name", "");
+        vcfg.base_name   = vc.value("base_name", "");
         vcfg.cloud_hz    = vc.value("cloud_hz", 10);
         vcfg.imu_hz      = vc.value("imu_hz", 100);
         auto client = std::make_shared<ViamClient>(vcfg);
         source_start = [client](FrameCallback f, IMUCallback i) { return client->start(f, i); };
         source_stop  = [client]() { client->stop(); };
+        if (!vcfg.base_name.empty()) {
+            nav_vel_cb = [client](float l, float a) { client->sendBaseVelocity(l, a); };
+        }
 #else
         std::cerr << "data_source=viam but HAVE_VIAM_SDK not compiled in.\n"
                   << "Install viam-cpp-sdk and rebuild.\n";
@@ -964,7 +969,7 @@ int main(int argc, char *argv[]) {
         rebuild_plan_items();
 
         navigator.setWaypoints(path);
-        navigator.start([&slam]() { return slam.getPose(); });
+        navigator.start([&slam]() { return slam.getPose(); }, nav_vel_cb);
         begin_btn->setEnabled(false);
         stop_btn->setEnabled(true);
     });

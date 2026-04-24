@@ -4,6 +4,7 @@
     "address":    "mugger-main.q0s2f7mco8.viam.cloud",
     "lidar_name": "livox-pc",
     "imu_name":   "livox-imu",
+    "base_name":  "mugger-base",
     "cloud_hz":   10,
     "imu_hz":     100
   },
