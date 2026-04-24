@@ -13,6 +13,12 @@
 #include <QApplication>
 #include <QSurfaceFormat>
 #include <QVTKOpenGLNativeWidget.h>
+
+#include <vtkAxesActor.h>
+#include <vtkOrientationMarkerWidget.h>
+#include <vtkRenderWindow.h>
+#include <vtkRenderWindowInteractor.h>
+#include <vtkSmartPointer.h>
 #include <QGraphicsScene>
 #include <QGraphicsView>
 #include <QGraphicsPixmapItem>
@@ -599,6 +605,20 @@ int main(int argc, char *argv[]) {
     float d = cam_dist / 1.732f;
     viewer.setCameraPosition(d, d, d, 0, 0, 0, 0, 0, 1);
     viewer.show();
+
+    // World-frame orientation marker (X=red, Y=green, Z=blue) in bottom-right corner.
+    // Held at function scope so it outlives the render loop.
+    vtkSmartPointer<vtkAxesActor> axes = vtkSmartPointer<vtkAxesActor>::New();
+    axes->SetXAxisLabelText("X");
+    axes->SetYAxisLabelText("Y");
+    axes->SetZAxisLabelText("Z");
+    vtkSmartPointer<vtkOrientationMarkerWidget> axis_widget =
+        vtkSmartPointer<vtkOrientationMarkerWidget>::New();
+    axis_widget->SetOrientationMarker(axes);
+    axis_widget->SetInteractor(viewer.renderWindow()->GetInteractor());
+    axis_widget->SetViewport(0.82, 0.0, 1.0, 0.22); // bottom-right corner
+    axis_widget->SetEnabled(1);
+    axis_widget->InteractiveOff();
 
     std::mutex cloud_mu;
     pcl::PointCloud<pcl::PointXYZI>::Ptr latest_cloud;
