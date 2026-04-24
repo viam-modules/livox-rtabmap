@@ -282,11 +282,16 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
         }
         odom_fail_count_ = 0;
 
-        current_pose_ = pose;
         frame_count_++;
 
         rtabmap_->process(data, pose);
         nodeId = rtabmap_->getLastLocationId();
+
+        // Store the map-frame pose, not the raw odom pose. In mapping mode
+        // mapCorrection is identity so this is a no-op; in localize-only mode
+        // it's the transform that aligns odometry to the loaded map.
+        rtabmap::Transform correction = rtabmap_->getMapCorrection();
+        current_pose_ = correction.isNull() ? pose : (correction * pose);
 
         if (frame_count_ % 10 == 0) {
             std::cout << "[SLAM] Frame " << frame_count_
