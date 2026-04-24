@@ -5,10 +5,17 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
+# CMake 4 removed support for cmake_minimum_required(VERSION < 3.5), which
+# breaks several transitive deps (Livox-SDK2 samples, xtl pulled by viam-sdk).
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+
 # Find dependencies
 find_package(RTABMap REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common io filters kdtree)
-find_package(Qt5 REQUIRED COMPONENTS Widgets)
+# Match whichever Qt major version rtabmap was built against
+# (Ubuntu librtabmap-dev → Qt5; Homebrew rtabmap → Qt6).
+find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
 find_package(nlohmann_json REQUIRED)
 
 # Optional: Viam C++ SDK for live data from a Viam machine.
@@ -38,12 +45,20 @@ if(WITH_VIAM)
 endif()
 
 # Build Livox-SDK2 static library
-# Patch: disable -Werror, add -include cstdint for GCC 13+, and allow old cmake_minimum_required
-set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+# Patch: disable -Werror, add -include cstdint for GCC 13+
 set(LIVOX_SDK_DIR ${CMAKE_SOURCE_DIR}/third_party/Livox-SDK2)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error -include cstdint")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-error")
 add_subdirectory(${LIVOX_SDK_DIR} ${CMAKE_BINARY_DIR}/livox-sdk2)
+# Livox-SDK2 hardcodes -Werror via target_compile_options, which fires on
+# AppleClang over its bundled spdlog/fmt (deprecated char_traits) and
+# FastCRC (unused private field). Override on the targets we link against.
+foreach(_livox_tgt livox_lidar_sdk_static livox_lidar_sdk_shared)
+    if(TARGET ${_livox_tgt})
+        target_compile_options(${_livox_tgt} PRIVATE
+            -Wno-error -Wno-deprecated-declarations -Wno-unused-private-field)
+    endif()
+endforeach()
 
 # Main executable
 set(SOURCES
@@ -76,7 +91,7 @@ target_link_libraries(livox_rtabmap PRIVATE
     rtabmap::gui
     rtabmap::utilite
     ${PCL_LIBRARIES}
-    Qt5::Widgets
+    Qt${QT_VERSION_MAJOR}::Widgets
     nlohmann_json::nlohmann_json
     pthread
 )

@@ -114,8 +114,10 @@ bool SlamPipeline::init(const json &config) {
     params.insert({rtabmap::Parameters::kRGBDAngularUpdate(),
         std::to_string(rtab.value("angular_update", 0.1))});
     // Localization-only mode: match against existing map, don't add new nodes
+    // and open the database read-only so the file isn't modified on exit.
     if (config.value("localize_only", false)) {
         params.insert({rtabmap::Parameters::kMemIncrementalMemory(), "false"});
+        params.insert({rtabmap::Parameters::kMemLocalizationReadOnly(), "true"});
     }
 
     odom_.reset(rtabmap::Odometry::create(params));
@@ -156,6 +158,41 @@ bool SlamPipeline::init(const json &config) {
 
     rtabmap_ = std::make_unique<rtabmap::Rtabmap>();
     rtabmap_->init(params, db_path_);
+
+    // Initial pose guess for localization. When localizing in a pre-built map
+    // rtabmap needs to know roughly where in the map we're starting, otherwise
+    // it has to search the whole graph. Accepts either:
+    //   "initial_pose": {"x":..,"y":..,"z":..,"roll":..,"pitch":..,"yaw":..}
+    // or a 12-element row-major matrix (rtabmap::Transform data layout).
+    if (config.contains("initial_pose") && !config["initial_pose"].is_null()) {
+        const auto &ip = config["initial_pose"];
+        rtabmap::Transform init;
+        if (ip.is_object()) {
+            float x     = ip.value("x",     0.0f);
+            float y     = ip.value("y",     0.0f);
+            float z     = ip.value("z",     0.0f);
+            float roll  = ip.value("roll",  0.0f);
+            float pitch = ip.value("pitch", 0.0f);
+            float yaw   = ip.value("yaw",   0.0f);
+            init = rtabmap::Transform(x, y, z, roll, pitch, yaw);
+        } else if (ip.is_array() && ip.size() == 12) {
+            std::array<float, 12> m{};
+            for (size_t i = 0; i < 12; i++) m[i] = ip[i].get<float>();
+            init = rtabmap::Transform(m[0], m[1], m[2], m[3],
+                                      m[4], m[5], m[6], m[7],
+                                      m[8], m[9], m[10], m[11]);
+        }
+        if (!init.isNull()) {
+            // Seed odometry immediately so frame 0 starts at this pose.
+            odom_->reset(init);
+            // Stash for loadMap() to re-apply after the database is loaded —
+            // calling setInitialPose before the map is loaded has no effect.
+            initial_pose_ = init;
+            // Also apply here in case loadMap is never called (pure mapping mode).
+            rtabmap_->setInitialPose(init);
+            std::cout << "[SLAM] Initial pose set: " << init.prettyPrint() << "\n";
+        }
+    }
 
     // Occupancy grid maker — 2D projection with ray tracing for free space
     rtabmap::ParametersMap grid_params;
@@ -252,14 +289,36 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
         }
         odom_fail_count_ = 0;
 
-        current_pose_ = pose;
         frame_count_++;
 
         rtabmap_->process(data, pose);
         nodeId = rtabmap_->getLastLocationId();
 
+        // Store the map-frame pose, not the raw odom pose. In mapping mode
+        // mapCorrection is identity so this is a no-op; in localize-only mode
+        // it's the transform that aligns odometry to the loaded map.
+        rtabmap::Transform correction = rtabmap_->getMapCorrection();
+        current_pose_ = correction.isNull() ? pose : (correction * pose);
+
+        // Localization state: correction is identity until rtabmap matches a
+        // loaded-map node. Once set it stays (even through intermittent odom
+        // failures), so this is a latch, not a per-frame presence signal.
+        bool locked_now = !correction.isNull() && !correction.isIdentity();
+        int loop_id = rtabmap_->getLoopClosureId();
+        if (locked_now && !localized_) {
+            std::cout << "[SLAM] *** LOCALIZED *** to map via node " << loop_id
+                      << " | correction: " << correction.prettyPrint() << "\n";
+            localized_ = true;
+        } else if (loop_id > 0) {
+            // Subsequent loop-closure hits refine the correction; worth logging.
+            std::cout << "[SLAM] Loop closure this frame: node " << loop_id
+                      << " (score " << std::fixed << std::setprecision(3)
+                      << rtabmap_->getLoopClosureValue() << ")\n";
+        }
+
         if (frame_count_ % 10 == 0) {
             std::cout << "[SLAM] Frame " << frame_count_
+                      << " | " << (localized_ ? "LOCALIZED" : "SEARCHING")
                       << " | pose: " << pose.prettyPrint()
                       << " | icp_ratio=" << std::fixed << std::setprecision(2)
                       << odom_info.reg.icpInliersRatio
@@ -333,6 +392,11 @@ void SlamPipeline::processImu(const ImuReading &imu) {
 rtabmap::Transform SlamPipeline::getPose() const {
     std::lock_guard<std::mutex> lock(slam_mutex_);
     return current_pose_;
+}
+
+bool SlamPipeline::isLocalized() const {
+    std::lock_guard<std::mutex> lock(slam_mutex_);
+    return localized_;
 }
 
 std::vector<std::pair<float,float>> SlamPipeline::getTrajectory() const {
@@ -418,6 +482,15 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr SlamPipeline::loadMap(int map_id) {
             std::cout << "[SLAM] Using raw odometry poses (no saved optimization found)\n";
         } else {
             std::cout << "[SLAM] Using optimized poses (" << poses.size() << " nodes)\n";
+        }
+
+        // Re-apply configured initial pose now that the map is loaded. Calling
+        // setInitialPose before loadMap has no effect — rtabmap needs the
+        // graph present to seed the localization search near the given pose.
+        if (!initial_pose_.isNull()) {
+            rtabmap_->setInitialPose(initial_pose_);
+            std::cout << "[SLAM] Re-applied initial pose to loaded map: "
+                      << initial_pose_.prettyPrint() << "\n";
         }
     } // slam_mutex_ released
 

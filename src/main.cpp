@@ -11,6 +11,19 @@
 #include <vector>
 
 #include <QApplication>
+#include <QSurfaceFormat>
+#include <QVTKOpenGLNativeWidget.h>
+
+#include <vtkAxesActor.h>
+#include <vtkOrientationMarkerWidget.h>
+#include <vtkRenderWindow.h>
+#include <vtkRenderWindowInteractor.h>
+#include <vtkRenderer.h>
+#include <vtkRendererCollection.h>
+#include <vtkSmartPointer.h>
+#include <vtkTextActor.h>
+#include <vtkTextProperty.h>
+#include <vtkCoordinate.h>
 #include <QGraphicsScene>
 #include <QGraphicsView>
 #include <QGraphicsPixmapItem>
@@ -82,6 +95,12 @@ int main(int argc, char *argv[]) {
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
 
+    // VTK's QVTKOpenGLNativeWidget (used by rtabmap::CloudViewer) requires
+    // the default surface format to be set before QApplication — otherwise
+    // the OpenGL context lacks VAO support and the first paint dereferences
+    // a null GL function pointer (crashes on macOS).
+    QSurfaceFormat::setDefaultFormat(QVTKOpenGLNativeWidget::defaultFormat());
+
     std::string config_path = "config/default.json";
     if (argc > 1 && argv[1][0] != '-') {
         config_path = argv[1];
@@ -106,6 +125,7 @@ int main(int argc, char *argv[]) {
     std::string color_mode = config.value("color_mode", "intensity");
     bool show_trajectory = config.value("show_trajectory", true);
     int map_add_interval = config.value("map_add_interval", 1);
+    bool add_scans_to_map = config.value("add_scans_to_map", true);
 
     auto map_color_arr = config.value("map_color", std::vector<int>{180, 180, 180});
     auto scan_color_arr = config.value("scan_color", std::vector<int>{0, 255, 0});
@@ -591,6 +611,38 @@ int main(int argc, char *argv[]) {
     viewer.setCameraPosition(d, d, d, 0, 0, 0, 0, 0, 1);
     viewer.show();
 
+    // World-frame orientation marker (X=red, Y=green, Z=blue) in bottom-right corner.
+    // Held at function scope so it outlives the render loop.
+    vtkSmartPointer<vtkAxesActor> axes = vtkSmartPointer<vtkAxesActor>::New();
+    axes->SetXAxisLabelText("X");
+    axes->SetYAxisLabelText("Y");
+    axes->SetZAxisLabelText("Z");
+    vtkSmartPointer<vtkOrientationMarkerWidget> axis_widget =
+        vtkSmartPointer<vtkOrientationMarkerWidget>::New();
+    axis_widget->SetOrientationMarker(axes);
+    axis_widget->SetInteractor(viewer.renderWindow()->GetInteractor());
+    axis_widget->SetViewport(0.82, 0.0, 1.0, 0.22); // bottom-right corner
+    axis_widget->SetEnabled(1);
+    axis_widget->InteractiveOff();
+
+    // Localization status overlay — top-right. Red SEARCHING until rtabmap
+    // locks onto the loaded map, then green LOCALIZED.
+    vtkSmartPointer<vtkTextActor> status_text = vtkSmartPointer<vtkTextActor>::New();
+    status_text->SetInput("SEARCHING");
+    status_text->GetTextProperty()->SetFontSize(22);
+    status_text->GetTextProperty()->SetBold(1);
+    status_text->GetTextProperty()->SetColor(1.0, 0.2, 0.2); // red
+    status_text->GetTextProperty()->SetJustificationToRight();
+    status_text->GetTextProperty()->SetVerticalJustificationToTop();
+    status_text->GetPositionCoordinate()->SetCoordinateSystemToNormalizedViewport();
+    status_text->SetPosition(0.985, 0.975);
+    if (auto *renderers = viewer.renderWindow()->GetRenderers()) {
+        renderers->InitTraversal();
+        if (auto *renderer = renderers->GetNextItem()) {
+            renderer->AddActor2D(status_text);
+        }
+    }
+
     std::mutex cloud_mu;
     pcl::PointCloud<pcl::PointXYZI>::Ptr latest_cloud;
     rtabmap::Transform latest_pose;
@@ -662,6 +714,7 @@ int main(int argc, char *argv[]) {
             if (!rf) return;
             json new_config = json::parse(rf);
             map_add_interval = new_config.value("map_add_interval", map_add_interval);
+            add_scans_to_map = new_config.value("add_scans_to_map", add_scans_to_map);
             map_voxel = new_config.value("map_voxel_size", map_voxel);
             downsample_interval = new_config.value("map_downsample_interval", downsample_interval);
             color_mode = new_config.value("color_mode", color_mode);
@@ -1004,8 +1057,8 @@ int main(int argc, char *argv[]) {
 
         max_frame_id = frame_count;
 
-        // Transform and accumulate points (only every map_add_interval frames)
-        bool add_to_map = (map_add_interval <= 1) || (frame_count % map_add_interval == 0);
+        // Transform and accumulate points (only every map_add_interval frames, and only if enabled)
+        bool add_to_map = add_scans_to_map && ((map_add_interval <= 1) || (frame_count % map_add_interval == 0));
         if (add_to_map) for (const auto &p : *latest_cloud) {
             float x = p.x, y = p.y, z = p.z;
             const float *d = latest_pose.data();
@@ -1124,6 +1177,12 @@ int main(int argc, char *argv[]) {
             .arg(frame_count)
             .arg(map_points.size())
             .arg(QString::fromStdString(color_mode)));
+
+        // Update localization state overlay
+        bool loc = slam.isLocalized();
+        status_text->SetInput(loc ? "LOCALIZED" : "SEARCHING");
+        if (loc) status_text->GetTextProperty()->SetColor(0.2, 1.0, 0.2);
+        else     status_text->GetTextProperty()->SetColor(1.0, 0.2, 0.2);
 
         viewer.refreshView();
     });
