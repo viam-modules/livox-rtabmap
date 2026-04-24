@@ -2,11 +2,14 @@
   "data_source": "viam",
   "viam": {
     "address":    "mugger-main.q0s2f7mco8.viam.cloud",
-    "lidar_name": "livox-pc",
-    "imu_name":   "livox-imu",
-    "base_name":  "mugger-base",
-    "cloud_hz":   10,
-    "imu_hz":     100
+    "lidar_name":     "livox-pc",
+    "imu_name":       "livox-imu",
+    "base_name":      "mugger-base",
+    "rgb_name":       "",
+    "planning_frame": "",
+    "cloud_hz":       10,
+    "imu_hz":         100,
+    "rgb_hz":         15
   },
   "headless": false,
   "database_path": "hackathon2_3.db",

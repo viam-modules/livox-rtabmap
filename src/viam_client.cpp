@@ -10,12 +10,28 @@
 
 #include <pcl/io/pcd_io.h>
 
+#include <opencv2/imgcodecs.hpp>
+
 #include <viam/sdk/components/base.hpp>
 #include <viam/sdk/components/camera.hpp>
 #include <viam/sdk/components/movement_sensor.hpp>
 #include <viam/sdk/robot/client.hpp>
 
 using namespace viam::sdk;
+
+// Convert a Viam pose (mm, axis-angle degrees) to an rtabmap Transform (m, rotation matrix).
+static rtabmap::Transform poseToTransform(const pose &p) {
+    float x = static_cast<float>(p.coordinates.x / 1000.0);
+    float y = static_cast<float>(p.coordinates.y / 1000.0);
+    float z = static_cast<float>(p.coordinates.z / 1000.0);
+    double half = p.theta * M_PI / 360.0;  // theta is degrees, half-angle
+    float qw = static_cast<float>(std::cos(half));
+    float s  = static_cast<float>(std::sin(half));
+    float qx = s * static_cast<float>(p.orientation.o_x);
+    float qy = s * static_cast<float>(p.orientation.o_y);
+    float qz = s * static_cast<float>(p.orientation.o_z);
+    return rtabmap::Transform(x, y, z, qx, qy, qz, qw);
+}
 
 // Helper: open a fresh connection using the client's config.
 static std::shared_ptr<RobotClient> connect(const ViamClient::Config &cfg) {
@@ -42,18 +58,22 @@ bool ViamClient::reconnect() {
             sensor_ = machine_->resource_by_name<MovementSensor>(cfg_.imu_name);
         if (!cfg_.base_name.empty())
             base_ = machine_->resource_by_name<Base>(cfg_.base_name);
+        if (!cfg_.rgb_name.empty())
+            rgb_cam_ = machine_->resource_by_name<Camera>(cfg_.rgb_name);
         std::cout << "[VIAM] Connected to " << cfg_.address << "\n";
+        queryFrameSystem();
         return true;
     } catch (const std::exception &e) {
         std::cerr << "[VIAM] reconnect failed: " << e.what() << "\n";
-        machine_.reset(); camera_.reset(); sensor_.reset(); base_.reset();
+        machine_.reset(); camera_.reset(); sensor_.reset(); base_.reset(); rgb_cam_.reset();
         return false;
     }
 }
 
-bool ViamClient::start(FrameCallback frame_cb, IMUCallback imu_cb) {
+bool ViamClient::start(FrameCallback frame_cb, IMUCallback imu_cb, RGBDCallback rgbd_cb) {
     frame_cb_ = std::move(frame_cb);
     imu_cb_   = std::move(imu_cb);
+    rgbd_cb_  = std::move(rgbd_cb);
 
     {
         std::lock_guard<std::mutex> lock(machine_mu_);
@@ -64,6 +84,8 @@ bool ViamClient::start(FrameCallback frame_cb, IMUCallback imu_cb) {
     cloud_thread_ = std::thread(&ViamClient::cloudLoop, this);
     if (imu_cb_ && !cfg_.imu_name.empty())
         imu_thread_ = std::thread(&ViamClient::imuLoop, this);
+    if (rgbd_cb_ && !cfg_.rgb_name.empty())
+        rgbd_thread_ = std::thread(&ViamClient::rgbdLoop, this);
     return true;
 }
 
@@ -71,6 +93,7 @@ void ViamClient::stop() {
     running_ = false;
     if (cloud_thread_.joinable()) cloud_thread_.join();
     if (imu_thread_.joinable())   imu_thread_.join();
+    if (rgbd_thread_.joinable())  rgbd_thread_.join();
 }
 
 void ViamClient::cloudLoop() {
@@ -196,6 +219,176 @@ void ViamClient::sendBaseVelocity(float linear_mps, float angular_rps) {
                 std::cerr << "[VIAM] set_velocity retry failed: " << e2.what() << "\n";
             }
         }
+    }
+}
+
+bool ViamClient::validateFrameSystem() const {
+    std::lock_guard<std::mutex> lock(const_cast<std::mutex &>(machine_mu_));
+
+    bool ok = true;
+
+    // Print one validation row and accumulate failures.
+    auto row = [&](const std::string &label, const std::string &name,
+                   bool configured, bool resolved) {
+        const char *status = !configured ? " -- " : (resolved ? " OK " : "FAIL");
+        std::cout << "  [" << status << "]  " << label;
+        if (configured) std::cout << "  " << name;
+        else            std::cout << "  (not configured)";
+        std::cout << "\n";
+        if (configured && !resolved) ok = false;
+    };
+
+    std::cout << "[VIAM] Validation:\n";
+
+    // Component handles
+    row("lidar  ", cfg_.lidar_name, true,                   camera_  != nullptr);
+    row("imu    ", cfg_.imu_name,   !cfg_.imu_name.empty(), sensor_  != nullptr);
+    row("base   ", cfg_.base_name,  !cfg_.base_name.empty(), base_   != nullptr);
+    row("rgb    ", cfg_.rgb_name,   !cfg_.rgb_name.empty(), rgb_cam_ != nullptr);
+
+    // Frame transforms
+    bool have_frame = !cfg_.planning_frame.empty();
+    row("lidar→'" + (have_frame ? cfg_.planning_frame : "?") + "'",
+        "",       have_frame,                    !lidar_in_planning_frame_.isNull());
+    row("cam→lidar  ", "",
+        have_frame && !cfg_.rgb_name.empty(),    !camera_to_lidar_.isNull());
+    row("imu→lidar  ", "",
+        have_frame && !cfg_.imu_name.empty(),    !imu_to_lidar_.isNull());
+
+    if (ok) std::cout << "[VIAM] All configured sensors/frames OK\n";
+    else    std::cerr << "[VIAM] Validation FAILED — check component names and frame system\n";
+
+    return ok;
+}
+
+void ViamClient::queryFrameSystem() {
+    // Must be called with machine_mu_ held (called from reconnect()).
+    if (cfg_.planning_frame.empty() || !machine_) return;
+
+    try {
+        auto pif = machine_->get_pose(cfg_.lidar_name, cfg_.planning_frame, {});
+        lidar_in_planning_frame_ = poseToTransform(pif.pose);
+        std::cout << "[VIAM] Lidar in planning frame '" << cfg_.planning_frame << "': "
+                  << lidar_in_planning_frame_.prettyPrint() << "\n";
+    } catch (const std::exception &e) {
+        std::cerr << "[VIAM] get_pose(" << cfg_.lidar_name << ", " << cfg_.planning_frame
+                  << ") failed: " << e.what() << "\n";
+    }
+
+    if (!cfg_.rgb_name.empty()) {
+        try {
+            auto pif = machine_->get_pose(cfg_.rgb_name, cfg_.lidar_name, {});
+            camera_to_lidar_ = poseToTransform(pif.pose);
+            std::cout << "[VIAM] Camera '" << cfg_.rgb_name << "' in lidar frame: "
+                      << camera_to_lidar_.prettyPrint() << "\n";
+        } catch (const std::exception &e) {
+            std::cerr << "[VIAM] get_pose(" << cfg_.rgb_name << ", " << cfg_.lidar_name
+                      << ") failed: " << e.what() << "\n";
+        }
+    }
+
+    if (!cfg_.imu_name.empty()) {
+        try {
+            auto pif = machine_->get_pose(cfg_.imu_name, cfg_.lidar_name, {});
+            imu_to_lidar_ = poseToTransform(pif.pose);
+            std::cout << "[VIAM] IMU '" << cfg_.imu_name << "' in lidar frame: "
+                      << imu_to_lidar_.prettyPrint() << "\n";
+        } catch (const std::exception &e) {
+            std::cerr << "[VIAM] get_pose(" << cfg_.imu_name << ", " << cfg_.lidar_name
+                      << ") failed: " << e.what() << "\n";
+        }
+    }
+}
+
+void ViamClient::rgbdLoop() {
+    const auto interval = std::chrono::microseconds(1'000'000 / cfg_.rgb_hz);
+
+    double fx = 0, fy = 0, cx = 0, cy = 0;
+    int width = 0, height = 0;
+    bool have_intrinsics = false;
+
+    while (running_) {
+        auto t0 = std::chrono::steady_clock::now();
+
+        std::shared_ptr<Camera> cam;
+        {
+            std::lock_guard<std::mutex> lock(machine_mu_);
+            cam = rgb_cam_;
+            if (!cam && !reconnect()) {
+                std::this_thread::sleep_until(t0 + interval);
+                continue;
+            }
+            cam = rgb_cam_;
+        }
+
+        if (!have_intrinsics) {
+            try {
+                auto props = cam->get_properties();
+                fx = props.intrinsic_parameters.focal_x_px;
+                fy = props.intrinsic_parameters.focal_y_px;
+                cx = props.intrinsic_parameters.center_x_px;
+                cy = props.intrinsic_parameters.center_y_px;
+                width  = props.intrinsic_parameters.width_px;
+                height = props.intrinsic_parameters.height_px;
+                have_intrinsics = true;
+                std::cout << "[VIAM] RGBD intrinsics: fx=" << fx << " fy=" << fy
+                          << " cx=" << cx << " cy=" << cy
+                          << " size=" << width << "x" << height << "\n";
+            } catch (const std::exception &e) {
+                std::cerr << "[VIAM] RGBD get_properties: " << e.what() << "\n";
+                std::this_thread::sleep_until(t0 + interval);
+                continue;
+            }
+        }
+
+        try {
+            auto images = cam->get_images();
+            uint64_t ts_ns = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count());
+
+            cv::Mat rgb, depth;
+
+            for (const auto &img : images.images) {
+                if (img.mime_type.find("dep") != std::string::npos) {
+                    try {
+                        Camera::depth_map dm = Camera::decode_depth_map(img.bytes);
+                        int h = static_cast<int>(dm.shape(0));
+                        int w = static_cast<int>(dm.shape(1));
+                        cv::Mat depth_mm(h, w, CV_16UC1);
+                        for (int r = 0; r < h; r++)
+                            for (int c = 0; c < w; c++)
+                                depth_mm.at<uint16_t>(r, c) = dm(r, c);
+                        depth_mm.convertTo(depth, CV_32FC1, 0.001f);
+                    } catch (const std::exception &e) {
+                        std::cerr << "[VIAM] depth decode: " << e.what() << "\n";
+                    }
+                } else {
+                    std::vector<uint8_t> buf(img.bytes.begin(), img.bytes.end());
+                    cv::Mat decoded = cv::imdecode(buf, cv::IMREAD_COLOR);
+                    if (!decoded.empty()) rgb = decoded;
+                }
+            }
+
+            if (!rgb.empty() || !depth.empty()) {
+                RGBDFrame frame;
+                frame.rgb   = rgb;
+                frame.depth = depth;
+                frame.fx = fx; frame.fy = fy;
+                frame.cx = cx; frame.cy = cy;
+                frame.width  = width;
+                frame.height = height;
+                frame.timestamp_ns = ts_ns;
+                rgbd_cb_(frame);
+            }
+        } catch (const std::exception &e) {
+            std::cerr << "[VIAM] RGBD read: " << e.what() << " — reconnecting\n";
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            std::lock_guard<std::mutex> lock(machine_mu_);
+            reconnect();
+        }
+
+        std::this_thread::sleep_until(t0 + interval);
     }
 }
 

@@ -15,6 +15,7 @@
 #include <rtabmap/core/Transform.h>
 #include <rtabmap/core/Odometry.h>
 #include <rtabmap/core/SensorData.h>
+#include <rtabmap/core/CameraModel.h>
 #include <rtabmap/core/IMU.h>
 #include <rtabmap/core/LocalGrid.h>
 #include <rtabmap/core/LocalGridMaker.h>
@@ -36,6 +37,23 @@ public:
     // filtered_cloud is set to the range-filtered cloud for display.
     bool processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t timestamp_ns,
                       pcl::PointCloud<pcl::PointXYZI>::Ptr *filtered_cloud = nullptr);
+
+    // Feed the latest RGBD frame (called from ViamClient's rgbd thread).
+    // Stored and consumed on the next processCloud() call.
+    void setLatestRGBD(const cv::Mat &rgb, const cv::Mat &depth,
+                       double fx, double fy, double cx, double cy,
+                       int width, int height);
+
+    // Set the camera-to-lidar extrinsic transform (from Viam frame system).
+    // Must be called before the first setLatestRGBD() for it to take effect.
+    void setCameraToLidar(const rtabmap::Transform &t);
+
+    // Set the initial SLAM pose from the Viam planning frame.
+    // Overrides any initial_pose in the config. Call after init().
+    void setInitialPose(const rtabmap::Transform &t);
+
+    // Set the IMU-to-lidar extrinsic transform (from Viam frame system).
+    void setImuToLidar(const rtabmap::Transform &t);
 
     // Feed IMU data for motion prior (called at 200Hz)
     void processIMU(float gyro_x, float gyro_y, float gyro_z,
@@ -110,6 +128,18 @@ private:
     std::atomic<double> last_high_accel_time_{0};
 
     bool localize_only_ = false;
+
+    // Latest RGBD frame from the RGB camera (updated by setLatestRGBD, consumed by processCloud)
+    mutable std::mutex rgbd_mutex_;
+    cv::Mat latest_rgb_;
+    cv::Mat latest_depth_;
+    rtabmap::CameraModel camera_model_;
+    rtabmap::Transform cam_to_lidar_;  // set by setCameraToLidar(), default identity
+    bool has_rgbd_ = false;
+
+    // IMU-to-lidar extrinsic (set by setImuToLidar, default identity)
+    // Protected by slam_mutex_ since processImu() reads it.
+    rtabmap::Transform imu_to_lidar_;
 
     // Consecutive odometry failure tracking — reset odometry after too many failures
     int odom_fail_count_ = 0;

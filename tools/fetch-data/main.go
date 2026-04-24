@@ -23,7 +23,7 @@ type ManifestEntry struct {
 	ComponentName string    `json:"component_name"`
 	TimeRequested time.Time `json:"time_requested"`
 	Tags          []string  `json:"tags"`
-	DataType      string    `json:"data_type"` // "pcd" or "imu"
+	DataType      string    `json:"data_type"` // "pcd", "imu", "color", or "depth"
 }
 
 func main() {
@@ -42,7 +42,8 @@ func main() {
 	endStr := flag.String("end", os.Getenv("END"), "end of time range (default: now) [env: END]")
 	tag := flag.String("tag", os.Getenv("TAG"), "tag filter (optional) [env: TAG]")
 	lidarComponent := flag.String("lidar", os.Getenv("LIDAR_COMPONENT"), "lidar component name (e.g. 'mid360') [env: LIDAR_COMPONENT]")
-	imuComponent := flag.String("imu", os.Getenv("IMU_COMPONENT"), "IMU/movement-sensor component name (optional) [env: IMU_COMPONENT]")
+	imuComponent   := flag.String("imu", os.Getenv("IMU_COMPONENT"), "IMU/movement-sensor component name (optional) [env: IMU_COMPONENT]")
+	rgbComponent   := flag.String("rgb-camera", os.Getenv("RGB_COMPONENT"), "RGBD camera component name (optional) [env: RGB_COMPONENT]")
 	outDir    := flag.String("out", outDefault, "output directory [env: OUT_DIR]")
 	workers   := flag.Int("workers", 4, "parallel download workers for binary data")
 	flag.Parse()
@@ -128,6 +129,7 @@ func main() {
 
 	pcdDir := filepath.Join(*outDir, "pcd")
 	imuDir := filepath.Join(*outDir, "imu")
+	rgbDir := filepath.Join(*outDir, "rgb")
 
 	if err := os.MkdirAll(pcdDir, 0o755); err != nil {
 		logger.Fatalf("failed to create pcd dir: %v", err)
@@ -143,9 +145,37 @@ func main() {
 	}
 
 	fmt.Printf("searching for PCD data from %s to %s...\n", start.Format(time.RFC3339), end.Format(time.RFC3339))
-	pcdEntries := downloadBinaryData(ctx, dataClient, &pcdFilter, pcdDir, "pcd", start, end, *workers, logger)
+	pcdEntries := downloadBinaryData(ctx, dataClient, &pcdFilter, pcdDir, start, end, *workers, logger,
+		func(ts int64, component, fileExt string) (string, string) {
+			return fmt.Sprintf("%d_%s.pcd", ts, component), "pcd"
+		})
 	fmt.Printf("downloaded %d PCD file(s) → %s\n", len(pcdEntries), pcdDir)
 	allEntries = append(allEntries, pcdEntries...)
+
+	// --- Download RGBD image data ---
+	if *rgbComponent != "" {
+		if err := os.MkdirAll(rgbDir, 0o755); err != nil {
+			logger.Fatalf("failed to create rgb dir: %v", err)
+		}
+
+		rgbFilter := baseFilter
+		rgbFilter.ComponentName = *rgbComponent
+
+		fmt.Printf("\nsearching for RGBD data from component %q...\n", *rgbComponent)
+		rgbEntries := downloadBinaryData(ctx, dataClient, &rgbFilter, rgbDir, start, end, *workers, logger,
+			func(ts int64, component, fileExt string) (string, string) {
+				switch fileExt {
+				case ".jpeg", ".jpg", ".png":
+					return fmt.Sprintf("%d_color%s", ts, fileExt), "color"
+				case ".dep":
+					return fmt.Sprintf("%d_depth%s", ts, fileExt), "depth"
+				default:
+					return fmt.Sprintf("%d_%s%s", ts, component, fileExt), "color"
+				}
+			})
+		fmt.Printf("downloaded %d RGBD image(s) → %s\n", len(rgbEntries), rgbDir)
+		allEntries = append(allEntries, rgbEntries...)
+	}
 
 	// --- Download IMU tabular data (as JSON) ---
 	if *imuComponent != "" {
@@ -167,12 +197,16 @@ func main() {
 	}
 }
 
+// nameFn maps (timestamp_ns, component, fileExt) → (filename, dataType).
+// fileExt includes the leading dot (e.g. ".pcd", ".jpeg", ".dep").
+type nameFn func(ts int64, component, fileExt string) (filename, dataType string)
+
 // collectBinaryMetadata pages through BinaryDataByFilter (no binary payload).
 // Files already present in outDir are returned as cachedEntries (no download needed).
 // Files that need downloading are returned as ids + downloadEntries (1:1 correspondence).
 // Records outside [start, end] are skipped with a warning.
 func collectBinaryMetadata(ctx context.Context, dc *app.DataClient, filter *app.Filter,
-	outDir, dataType string, start, end time.Time, logger logging.Logger,
+	outDir string, start, end time.Time, namer nameFn, logger logging.Logger,
 ) (ids []string, downloadEntries []ManifestEntry, cachedEntries []ManifestEntry) {
 	var last string
 	skipped := 0
@@ -195,17 +229,18 @@ func collectBinaryMetadata(ctx context.Context, dc *app.DataClient, filter *app.
 				continue
 			}
 
-			var component string
+			var component, fileExt string
 			var tags []string
 			if d.Metadata != nil {
 				component = d.Metadata.CaptureMetadata.ComponentName
 				tags = d.Metadata.CaptureMetadata.Tags
+				fileExt = d.Metadata.FileExt
 			}
 			if component == "" {
-				component = "lidar"
+				component = "unknown"
 			}
 
-			filename := fmt.Sprintf("%d_%s.pcd", t.UnixNano(), component)
+			filename, dataType := namer(t.UnixNano(), component, fileExt)
 			entry := ManifestEntry{
 				Filename:      filename,
 				ComponentName: component,
@@ -236,8 +271,8 @@ func collectBinaryMetadata(ctx context.Context, dc *app.DataClient, filter *app.
 }
 
 // downloadBinaryData fetches binary files in parallel, writes them to outDir, returns manifest entries.
-func downloadBinaryData(ctx context.Context, dc *app.DataClient, filter *app.Filter, outDir, dataType string, start, end time.Time, numWorkers int, logger logging.Logger) []ManifestEntry {
-	ids, downloadEntries, cachedEntries := collectBinaryMetadata(ctx, dc, filter, outDir, dataType, start, end, logger)
+func downloadBinaryData(ctx context.Context, dc *app.DataClient, filter *app.Filter, outDir string, start, end time.Time, numWorkers int, logger logging.Logger, namer nameFn) []ManifestEntry {
+	ids, downloadEntries, cachedEntries := collectBinaryMetadata(ctx, dc, filter, outDir, start, end, namer, logger)
 
 	total := len(ids) + len(cachedEntries)
 	if total == 0 {

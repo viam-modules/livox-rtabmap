@@ -4,8 +4,11 @@
 #include <chrono>
 #include <filesystem>
 #include <iostream>
+#include <map>
 #include <string>
 #include <thread>
+
+#include <opencv2/imgcodecs.hpp>
 
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_types.h>
@@ -65,9 +68,56 @@ bool PcdPlayer::loadImu(const std::string &dir, bool use_orientation) {
     return imu_reader_.load(dir, use_orientation);
 }
 
-void PcdPlayer::play(FrameCallback pcdCb, ImuCallback imuCb, int delay_ms) {
+bool PcdPlayer::loadRgb(const std::string &dir) {
+    rgb_files_.clear();
+
+    if (!fs::is_directory(dir)) {
+        std::cerr << "[PcdPlayer] rgb dir not found: " << dir << "\n";
+        return false;
+    }
+
+    // Collect color and depth files by timestamp prefix.
+    // Filenames from fetch-data: {ts}_color.{ext} and {ts}_depth.dep
+    std::map<uint64_t, RGBDFile> by_ts;
+
+    for (const auto &entry : fs::directory_iterator(dir)) {
+        std::string stem = entry.path().stem().string();   // e.g. "1234567890_color"
+        std::string ext  = entry.path().extension().string(); // e.g. ".jpeg"
+
+        uint64_t ts = 0;
+        try { ts = static_cast<uint64_t>(std::stoull(stem)); }
+        catch (...) { continue; }
+        if (ts == 0) continue;
+
+        // Determine type from suffix after the first underscore
+        auto under = stem.find('_');
+        std::string suffix = (under != std::string::npos) ? stem.substr(under + 1) : "";
+
+        auto &rf = by_ts[ts];
+        rf.timestamp_ns = ts;
+        if (suffix == "color") {
+            rf.color_path = entry.path().string();
+        } else if (suffix == "depth") {
+            rf.depth_path = entry.path().string();
+        }
+    }
+
+    for (auto &[ts, rf] : by_ts) {
+        if (!rf.color_path.empty() || !rf.depth_path.empty())
+            rgb_files_.push_back(rf);
+    }
+
+    std::sort(rgb_files_.begin(), rgb_files_.end(),
+              [](const RGBDFile &a, const RGBDFile &b) { return a.timestamp_ns < b.timestamp_ns; });
+
+    std::cout << "[PcdPlayer] loaded " << rgb_files_.size() << " RGBD frame(s) from " << dir << "\n";
+    return !rgb_files_.empty();
+}
+
+void PcdPlayer::play(FrameCallback pcdCb, ImuCallback imuCb, int delay_ms, RGBDCallback rgbdCb) {
     const auto &imu = imu_reader_.readings();
     size_t imu_idx = 0;
+    size_t rgb_idx = 0;  // index of the next undelivered RGBD frame
 
     int pcd_idx = 0;
     for (const auto &f : files_) {
@@ -79,6 +129,28 @@ void PcdPlayer::play(FrameCallback pcdCb, ImuCallback imuCb, int delay_ms) {
                 imuCb(imu[imu_idx]);
                 imu_idx++;
             }
+        }
+
+        // Advance RGBD index to the frame closest to this PCD timestamp
+        if (rgbdCb && !rgb_files_.empty()) {
+            while (rgb_idx + 1 < rgb_files_.size() &&
+                   rgb_files_[rgb_idx + 1].timestamp_ns <= f.timestamp_ns) {
+                rgb_idx++;
+            }
+            const auto &rf = rgb_files_[rgb_idx];
+            RGBDReading reading;
+            reading.timestamp_ns = rf.timestamp_ns;
+            if (!rf.color_path.empty())
+                reading.rgb = cv::imread(rf.color_path, cv::IMREAD_COLOR);
+            if (!rf.depth_path.empty()) {
+                // .dep is the Viam raw depth format — decode via libviamcamera if available,
+                // otherwise treat as 16-bit PNG (millimeters) and convert to float meters.
+                cv::Mat raw = cv::imread(rf.depth_path, cv::IMREAD_ANYDEPTH);
+                if (!raw.empty()) {
+                    raw.convertTo(reading.depth, CV_32FC1, 0.001f);
+                }
+            }
+            rgbdCb(reading);
         }
 
         auto cloud_xyz = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();

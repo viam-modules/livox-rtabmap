@@ -117,6 +117,7 @@ int main(int argc, char *argv[]) {
     std::string host_ip = config.value("host_ip", "192.168.1.10");
     std::string playback_dir = config.value("playback_dir", "");
     std::string imu_dir = config.value("imu_dir", "");
+    std::string rgb_dir = config.value("rgb_dir", "");
     int playback_delay_ms = config.value("playback_delay_ms", 0);
     bool headless = config.value("headless", false);
     std::string data_source = config.value("data_source", "livox");
@@ -303,9 +304,30 @@ int main(int argc, char *argv[]) {
         if (!imu_dir.empty()) {
             player.loadImu(imu_dir, config.value("imu_use_orientation", false)); // non-fatal if missing
         }
+        if (!rgb_dir.empty()) {
+            player.loadRgb(rgb_dir); // non-fatal if missing
+        }
 
         auto imuCb = [&slam](const ImuReading &imu) {
             slam.processImu(imu);
+        };
+        // Intrinsics must be in config "rgb_intrinsics": {fx, fy, cx, cy, width, height}
+        double rgb_fx = 0, rgb_fy = 0, rgb_cx = 0, rgb_cy = 0;
+        int rgb_w = 0, rgb_h = 0;
+        bool have_rgb_intrinsics = false;
+        if (config.contains("rgb_intrinsics")) {
+            auto &ri = config["rgb_intrinsics"];
+            rgb_fx = ri.value("fx", 0.0);
+            rgb_fy = ri.value("fy", 0.0);
+            rgb_cx = ri.value("cx", 0.0);
+            rgb_cy = ri.value("cy", 0.0);
+            rgb_w  = ri.value("width",  0);
+            rgb_h  = ri.value("height", 0);
+            have_rgb_intrinsics = (rgb_fx > 0 && rgb_fy > 0);
+        }
+        auto rgbdCb = [&slam, rgb_fx, rgb_fy, rgb_cx, rgb_cy, rgb_w, rgb_h, have_rgb_intrinsics](const RGBDReading &r) {
+            if (!have_rgb_intrinsics) return;
+            slam.setLatestRGBD(r.rgb, r.depth, rgb_fx, rgb_fy, rgb_cx, rgb_cy, rgb_w, rgb_h);
         };
 
         if (headless) {
@@ -315,7 +337,8 @@ int main(int argc, char *argv[]) {
                     slam.processCloud(cloud, ts);
                 },
                 imuCb,
-                playback_delay_ms);
+                playback_delay_ms,
+                !rgb_dir.empty() ? rgbdCb : PcdPlayer::RGBDCallback{});
 
             std::cout << "\nPlayback done: " << slam.getFrameCount() << " frames processed\n";
             if (running &&
@@ -368,7 +391,8 @@ int main(int argc, char *argv[]) {
                     }
                 },
                 imuCb,
-                playback_delay_ms);
+                playback_delay_ms,
+                !rgb_dir.empty() ? rgbdCb : PcdPlayer::RGBDCallback{});
 
             playback_done = true;
             std::cout << "\nPlayback done: " << slam.getFrameCount() << " frames processed\n";
@@ -549,6 +573,9 @@ int main(int argc, char *argv[]) {
     std::atomic<bool> motors_enabled{config.value("base_control_enabled", false)};
     std::function<void(float, float)> nav_vel_cb; // set below if Viam base is configured
     std::function<void()> send_stop_fn;           // sends 0,0 regardless of motors_enabled
+#ifdef HAVE_VIAM_SDK
+    std::shared_ptr<ViamClient> viam_client;
+#endif
 
     if (data_source == "viam") {
 #ifdef HAVE_VIAM_SDK
@@ -568,10 +595,24 @@ int main(int argc, char *argv[]) {
         vcfg.lidar_name  = vc.value("lidar_name", "");
         vcfg.imu_name    = vc.value("imu_name", "");
         vcfg.base_name   = vc.value("base_name", "");
+        vcfg.rgb_name       = vc.value("rgb_name", "");
+        vcfg.planning_frame = vc.value("planning_frame", "");
         vcfg.cloud_hz    = vc.value("cloud_hz", 10);
         vcfg.imu_hz      = vc.value("imu_hz", 100);
-        auto client = std::make_shared<ViamClient>(vcfg);
-        source_start = [client](FrameCallback f, IMUCallback i) { return client->start(f, i); };
+        vcfg.rgb_hz      = vc.value("rgb_hz", 15);
+        viam_client = std::make_shared<ViamClient>(vcfg);
+        auto client = viam_client;
+        source_start = [client, &slam, rgb_name = vcfg.rgb_name](FrameCallback f, IMUCallback i) {
+            RGBDCallback rgbd_cb;
+            if (!rgb_name.empty()) {
+                rgbd_cb = [&slam](const RGBDFrame &frame) {
+                    slam.setLatestRGBD(frame.rgb, frame.depth,
+                                       frame.fx, frame.fy, frame.cx, frame.cy,
+                                       frame.width, frame.height);
+                };
+            }
+            return client->start(f, i, rgbd_cb);
+        };
         source_stop  = [client]() { client->stop(); };
         if (!vcfg.base_name.empty()) {
             nav_vel_cb   = [client, &motors_enabled](float l, float a) {
@@ -599,11 +640,32 @@ int main(int argc, char *argv[]) {
                         imu.timestamp_ns);
     };
 
+    // Apply Viam frame system results to the SLAM pipeline after connection.
+    // get_pose() is called during start() → reconnect(), so results are ready here.
+    auto applyViamFrameSystem = [&]() {
+#ifdef HAVE_VIAM_SDK
+        if (!viam_client) return;
+        auto cam_to_lidar = viam_client->getCameraToLidar();
+        if (!cam_to_lidar.isNull())
+            slam.setCameraToLidar(cam_to_lidar);
+        auto imu_to_lidar = viam_client->getImuToLidar();
+        if (!imu_to_lidar.isNull())
+            slam.setImuToLidar(imu_to_lidar);
+        auto lidar_in_frame = viam_client->getLidarInPlanningFrame();
+        if (!lidar_in_frame.isNull())
+            slam.setInitialPose(lidar_in_frame);
+#endif
+    };
+
     // Live mode — headless
     if (headless) {
         if (!source_start(frame_cb, imu_cb)) {
             std::cerr << "Failed to start data source\n"; return 1;
         }
+#ifdef HAVE_VIAM_SDK
+        if (viam_client) viam_client->validateFrameSystem();
+#endif
+        applyViamFrameSystem();
         while (running) std::this_thread::sleep_for(std::chrono::seconds(1));
         source_stop();
         return 0;
@@ -730,6 +792,10 @@ int main(int argc, char *argv[]) {
                             imu.timestamp_ns);
         });
     if (!ok) { std::cerr << "Failed to start data source\n"; return 1; }
+#ifdef HAVE_VIAM_SDK
+    if (viam_client) viam_client->validateFrameSystem();
+#endif
+    applyViamFrameSystem();
 
     // Config live reload
     auto last_config_write = std::filesystem::last_write_time(config_path);

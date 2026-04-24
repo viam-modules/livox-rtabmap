@@ -28,7 +28,7 @@ if(WITH_VIAM)
     FetchContent_Declare(
         viam-cpp-sdk
         GIT_REPOSITORY https://github.com/viamrobotics/viam-cpp-sdk
-        GIT_TAG        releases/v0.31.0
+        GIT_TAG        releases/v0.34.0
         GIT_SHALLOW    TRUE
         SYSTEM
         # Without this patch the statically-included protobuf headers end up in
@@ -37,7 +37,7 @@ if(WITH_VIAM)
         FIND_PACKAGE_ARGS
     )
     FetchContent_MakeAvailable(viam-cpp-sdk)
-    find_package(viam-cpp-sdk 0.31 CONFIG REQUIRED viamsdk)
+    find_package(viam-cpp-sdk 0.34 CONFIG REQUIRED viamsdk)
     # viamsdk doesn't add its src/ dir to INTERFACE_INCLUDE_DIRECTORIES —
     # it expects an install step. Add it directly from the FetchContent source.
     FetchContent_GetProperties(viam-cpp-sdk SOURCE_DIR _viam_src)
@@ -97,9 +97,11 @@ target_link_libraries(livox_rtabmap PRIVATE
 )
 
 if(WITH_VIAM)
+    find_package(OpenCV REQUIRED COMPONENTS core imgcodecs)
     target_link_libraries(livox_rtabmap PRIVATE
         viam-cpp-sdk::viamsdk
         viam-cpp-sdk::viamapi  # gRPC proxy
+        opencv_imgcodecs
     )
     target_compile_definitions(livox_rtabmap PRIVATE HAVE_VIAM_SDK)
 endif()

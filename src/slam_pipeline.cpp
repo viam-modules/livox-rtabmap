@@ -225,6 +225,48 @@ bool SlamPipeline::init(const json &config) {
     return true;
 }
 
+void SlamPipeline::setCameraToLidar(const rtabmap::Transform &t) {
+    std::lock_guard<std::mutex> lock(rgbd_mutex_);
+    cam_to_lidar_ = t;
+    // Invalidate cached model so it gets rebuilt with the new extrinsic on next setLatestRGBD
+    has_rgbd_ = false;
+    std::cout << "[SLAM] Camera-to-lidar extrinsic: " << t.prettyPrint() << "\n";
+}
+
+void SlamPipeline::setInitialPose(const rtabmap::Transform &t) {
+    std::lock_guard<std::mutex> lock(slam_mutex_);
+    if (t.isNull()) return;
+    initial_pose_ = t;
+    odom_->reset(t);
+    rtabmap_->setInitialPose(t);
+    std::cout << "[SLAM] Initial pose set from planning frame: " << t.prettyPrint() << "\n";
+}
+
+void SlamPipeline::setImuToLidar(const rtabmap::Transform &t) {
+    std::lock_guard<std::mutex> lock(slam_mutex_);
+    imu_to_lidar_ = t;
+    std::cout << "[SLAM] IMU-to-lidar extrinsic: " << t.prettyPrint() << "\n";
+}
+
+void SlamPipeline::setLatestRGBD(const cv::Mat &rgb, const cv::Mat &depth,
+                                  double fx, double fy, double cx, double cy,
+                                  int width, int height) {
+    std::lock_guard<std::mutex> lock(rgbd_mutex_);
+    latest_rgb_   = rgb.empty()   ? cv::Mat() : rgb.clone();
+    latest_depth_ = depth.empty() ? cv::Mat() : depth.clone();
+    if (!has_rgbd_) {
+        rtabmap::Transform local = cam_to_lidar_.isNull()
+                                   ? rtabmap::Transform::getIdentity()
+                                   : cam_to_lidar_;
+        camera_model_ = rtabmap::CameraModel("rgbd", fx, fy, cx, cy,
+                                              local, 0, cv::Size(width, height));
+        std::cout << "[SLAM] RGBD camera model: fx=" << fx << " fy=" << fy
+                  << " cx=" << cx << " cy=" << cy
+                  << " size=" << width << "x" << height << "\n";
+    }
+    has_rgbd_ = true;
+}
+
 bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint64_t timestamp_ns,
                                 pcl::PointCloud<pcl::PointXYZI>::Ptr *filtered_cloud) {
     if (!odom_ || !rtabmap_) return false;
@@ -263,9 +305,21 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
 
     auto t1 = std::chrono::steady_clock::now();
 
+    // Snapshot latest RGBD before acquiring slam_mutex_
+    cv::Mat rgb, depth;
+    rtabmap::CameraModel cam_model;
+    {
+        std::lock_guard<std::mutex> rlock(rgbd_mutex_);
+        if (has_rgbd_) {
+            rgb       = latest_rgb_;
+            depth     = latest_depth_;
+            cam_model = camera_model_;
+        }
+    }
+
     double stamp = static_cast<double>(timestamp_ns) / 1e9;
     rtabmap::LaserScan scan = rtabmap::util3d::laserScanFromPointCloud(*xyzi_filtered, lidar_to_base_);
-    rtabmap::SensorData data(scan, cv::Mat(), cv::Mat(), rtabmap::CameraModel(), 0, stamp);
+    rtabmap::SensorData data(scan, rgb, depth, cam_model, 0, stamp);
 
     auto t2 = std::chrono::steady_clock::now();
 
@@ -401,13 +455,17 @@ void SlamPipeline::processImu(const ImuReading &imu) {
     // Don't pass orientation to RTAB-Map — Viam's orientation frame convention
     // doesn't reliably match RTAB-Map's expected world frame (ENU), causing the
     // entire map to rotate. Gyro+accel integration is sufficient for motion prior.
+    rtabmap::Transform local = imu_to_lidar_.isNull()
+                               ? rtabmap::Transform::getIdentity()
+                               : imu_to_lidar_;
     rtabmap::IMU rtImu(
         last_orientation_,
         cov3_large,  // always ignore absolute orientation
         last_gyro_,
         has_gyro_ ? cov3 : cov3_large,
         last_accel_,
-        has_accel_ ? cov3 : cov3_large
+        has_accel_ ? cov3 : cov3_large,
+        local
     );
 
     double stamp = static_cast<double>(imu.timestamp_ns) / 1e9;
