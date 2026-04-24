@@ -118,6 +118,13 @@ bool SlamPipeline::init(const json &config) {
     if (config.value("localize_only", false)) {
         params.insert({rtabmap::Parameters::kMemIncrementalMemory(), "false"});
         params.insert({rtabmap::Parameters::kMemLocalizationReadOnly(), "true"});
+        // RGBD/StartAtOrigin defaults to false, which means rtabmap restores
+        // the last-saved localization pose from the previous session on init —
+        // that overrides our setInitialPose() call. When the user has
+        // supplied an initial_pose, prefer it over the stored last-pose.
+        if (config.contains("initial_pose") && !config["initial_pose"].is_null()) {
+            params.insert({rtabmap::Parameters::kRGBDStartAtOrigin(), "true"});
+        }
     }
 
     odom_.reset(rtabmap::Odometry::create(params));
@@ -330,11 +337,14 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
         if (frame_count_ % 10 == 0) {
             std::cout << "[SLAM] Frame " << frame_count_
                       << " | " << (localized_ ? "LOCALIZED" : "SEARCHING")
-                      << " | pose: " << pose.prettyPrint()
+                      << " | odom: " << pose.prettyPrint()
+                      << " | correction: " << (correction.isNull() ? std::string("null")
+                                              : correction.isIdentity() ? std::string("identity")
+                                              : correction.prettyPrint())
+                      << " | map_pose: " << current_pose_.prettyPrint()
                       << " | icp_ratio=" << std::fixed << std::setprecision(2)
                       << odom_info.reg.icpInliersRatio
-                      << " corr=" << odom_info.reg.icpCorrespondences
-                      << " rms=" << std::setprecision(4) << odom_info.reg.icpRMS << "\n";
+                      << " corr=" << odom_info.reg.icpCorrespondences << "\n";
         }
     } // slam_mutex_ released
 
