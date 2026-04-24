@@ -122,6 +122,7 @@ These control the graph SLAM backend (loop closure, map management).
 |-----------|------|---------|-------------|
 | `load_map` | null / string / int | `null` | Load a previous session on startup. `null` = fresh start. `"largest"` = load the session with the most nodes. `"last"` = load the most recently created session. Integer = load a specific `map_id` (use `tools/prune-db` to list IDs) |
 | `localize_only` | bool | `false` | If true, disables adding new nodes — RTAB-Map only localizes against the loaded map. Requires `load_map` to be set. Note: with LiDAR-only, the robot must start near the same origin as the loaded map for localization to lock on |
+| `initial_pose` | null / object / [12 floats] | `null` | Initial pose guess to seed rtabmap's localization in a loaded map. When set, rtabmap starts searching near this pose instead of from map origin — much faster lock-on when you don't start at the original origin. Object form: `{"x":..,"y":..,"z":..,"roll":..,"pitch":..,"yaw":..}` (meters/radians). Array form: 12-element row-major transform matrix |
 
 ### Extrinsics
 

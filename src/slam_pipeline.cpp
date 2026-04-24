@@ -157,6 +157,36 @@ bool SlamPipeline::init(const json &config) {
     rtabmap_ = std::make_unique<rtabmap::Rtabmap>();
     rtabmap_->init(params, db_path_);
 
+    // Initial pose guess for localization. When localizing in a pre-built map
+    // rtabmap needs to know roughly where in the map we're starting, otherwise
+    // it has to search the whole graph. Accepts either:
+    //   "initial_pose": {"x":..,"y":..,"z":..,"roll":..,"pitch":..,"yaw":..}
+    // or a 12-element row-major matrix (rtabmap::Transform data layout).
+    if (config.contains("initial_pose") && !config["initial_pose"].is_null()) {
+        const auto &ip = config["initial_pose"];
+        rtabmap::Transform init;
+        if (ip.is_object()) {
+            float x     = ip.value("x",     0.0f);
+            float y     = ip.value("y",     0.0f);
+            float z     = ip.value("z",     0.0f);
+            float roll  = ip.value("roll",  0.0f);
+            float pitch = ip.value("pitch", 0.0f);
+            float yaw   = ip.value("yaw",   0.0f);
+            init = rtabmap::Transform(x, y, z, roll, pitch, yaw);
+        } else if (ip.is_array() && ip.size() == 12) {
+            std::array<float, 12> m{};
+            for (size_t i = 0; i < 12; i++) m[i] = ip[i].get<float>();
+            init = rtabmap::Transform(m[0], m[1], m[2], m[3],
+                                      m[4], m[5], m[6], m[7],
+                                      m[8], m[9], m[10], m[11]);
+        }
+        if (!init.isNull()) {
+            rtabmap_->setInitialPose(init);
+            odom_->reset(init);
+            std::cout << "[SLAM] Initial pose set: " << init.prettyPrint() << "\n";
+        }
+    }
+
     // Occupancy grid maker — 2D projection with ray tracing for free space
     rtabmap::ParametersMap grid_params;
     grid_params.insert({rtabmap::Parameters::kGridCellSize(),

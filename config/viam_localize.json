@@ -8,10 +8,11 @@
     "imu_hz":     100
   },
   "headless": false,
-  "database_path": "hackathon2_3_post_3.db",
+  "database_path": "MAP.db",
   "use_imu_prior": false,
   "load_map": "largest",
   "localize_only": true,
+  "initial_pose": null,
   "extrinsics": {
     "x": 0.3, "y": 0.45, "z": 0.0,
     "roll": 0.0, "pitch": 0.0, "yaw": 1.5708
@@ -31,7 +32,7 @@
   "grid_range_max": 10.0,
   "grid_normals_segmentation": true,
   "grid_noise_radius": 0.0,
-  "color_mode": "flat",
+  "color_mode": "height",
   "map_color": [0, 255, 0],
   "scan_color": [255, 0, 0],
   "map_point_size": 1,
