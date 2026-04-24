@@ -341,25 +341,35 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
         // loaded-map node. Once set it stays (even through intermittent odom
         // failures), so this is a latch, not a per-frame presence signal.
         bool locked_now = !correction.isNull() && !correction.isIdentity();
+        // In LiDAR-only localization, matches almost always come through the
+        // proximity detection pathway (geometric), not the visual loop-closure
+        // pathway. Read both so we don't miss the match.
         int loop_id = rtabmap_->getLoopClosureId();
+        int prox_id = rtabmap_->getStatistics().proximityDetectionId();
+        int match_id = loop_id > 0 ? loop_id : prox_id;
+        const char *match_kind = loop_id > 0 ? "loop" : "proximity";
+
         if (locked_now && !localized_) {
-            std::cout << "[SLAM] *** LOCALIZED *** to map via node " << loop_id
+            std::cout << "[SLAM] *** LOCALIZED *** via " << match_kind
+                      << " match to node " << match_id
                       << " | correction: " << correction.prettyPrint() << "\n";
             localized_ = true;
-        } else if (loop_id > 0) {
-            // Subsequent loop-closure hits refine the correction; worth logging.
-            std::cout << "[SLAM] Loop closure this frame: node " << loop_id
-                      << " (score " << std::fixed << std::setprecision(3)
-                      << rtabmap_->getLoopClosureValue() << ")\n";
+        } else if (match_id > 0) {
+            std::cout << "[SLAM] " << match_kind << " match this frame: node "
+                      << match_id;
+            if (loop_id > 0) std::cout << " (score " << std::fixed
+                                       << std::setprecision(3)
+                                       << rtabmap_->getLoopClosureValue() << ")";
+            std::cout << "\n";
         }
 
         // Cache matched node pose (from loaded_poses_) for viewer rendering.
         // Lock order: slam_mutex_ (held) → grid_mutex_, matches loadMap.
-        if (loop_id > 0) {
+        if (match_id > 0) {
             std::lock_guard<std::mutex> glock(grid_mutex_);
-            auto it = loaded_poses_.find(loop_id);
+            auto it = loaded_poses_.find(match_id);
             if (it != loaded_poses_.end()) {
-                last_closure_id_ = loop_id;
+                last_closure_id_ = match_id;
                 last_closure_pose_ = it->second;
             }
         }
@@ -570,6 +580,20 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr SlamPipeline::loadMap(int map_id) {
             std::cout << "[SLAM] Using raw odometry poses (no saved optimization found)\n";
         } else {
             std::cout << "[SLAM] Using optimized poses (" << poses.size() << " nodes)\n";
+        }
+
+        // Dump node ID range so matches can be confirmed against this set.
+        // Any subsequent "match to node N" log must have N in this range —
+        // new nodes can't appear because IncrementalMemory=false.
+        if (!poses.empty()) {
+            int min_id = poses.begin()->first;
+            int max_id = poses.begin()->first;
+            for (auto &[id, _] : poses) {
+                if (id < min_id) min_id = id;
+                if (id > max_id) max_id = id;
+            }
+            std::cout << "[SLAM] Loaded map node IDs: [" << min_id << ".." << max_id
+                      << "] (" << poses.size() << " total)\n";
         }
 
         // Re-apply configured initial pose now that the map is loaded. Calling
