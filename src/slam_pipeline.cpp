@@ -394,6 +394,11 @@ rtabmap::Transform SlamPipeline::getPose() const {
     return current_pose_;
 }
 
+bool SlamPipeline::isLocalized() const {
+    std::lock_guard<std::mutex> lock(slam_mutex_);
+    return localized_;
+}
+
 std::vector<std::pair<float,float>> SlamPipeline::getTrajectory() const {
     std::lock_guard<std::mutex> lock(grid_mutex_);
     std::vector<std::pair<float,float>> traj;

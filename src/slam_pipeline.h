@@ -56,6 +56,10 @@ public:
     int getMapSize() const;
     int getFrameCount() const { return frame_count_; }
 
+    // True once rtabmap has produced a non-identity mapCorrection (i.e. it
+    // matched a loaded-map node). Latches — doesn't flip back on drift.
+    bool isLocalized() const;
+
     // Reconstruct accumulated map from database and populate the occupancy grid cache.
     // map_id = -1 loads all sessions; otherwise only that session.
     pcl::PointCloud<pcl::PointXYZI>::Ptr loadMap(int map_id = -1);

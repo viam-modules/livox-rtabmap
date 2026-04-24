@@ -18,7 +18,12 @@
 #include <vtkOrientationMarkerWidget.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderWindowInteractor.h>
+#include <vtkRenderer.h>
+#include <vtkRendererCollection.h>
 #include <vtkSmartPointer.h>
+#include <vtkTextActor.h>
+#include <vtkTextProperty.h>
+#include <vtkCoordinate.h>
 #include <QGraphicsScene>
 #include <QGraphicsView>
 #include <QGraphicsPixmapItem>
@@ -620,6 +625,24 @@ int main(int argc, char *argv[]) {
     axis_widget->SetEnabled(1);
     axis_widget->InteractiveOff();
 
+    // Localization status overlay — top-right. Red SEARCHING until rtabmap
+    // locks onto the loaded map, then green LOCALIZED.
+    vtkSmartPointer<vtkTextActor> status_text = vtkSmartPointer<vtkTextActor>::New();
+    status_text->SetInput("SEARCHING");
+    status_text->GetTextProperty()->SetFontSize(22);
+    status_text->GetTextProperty()->SetBold(1);
+    status_text->GetTextProperty()->SetColor(1.0, 0.2, 0.2); // red
+    status_text->GetTextProperty()->SetJustificationToRight();
+    status_text->GetTextProperty()->SetVerticalJustificationToTop();
+    status_text->GetPositionCoordinate()->SetCoordinateSystemToNormalizedViewport();
+    status_text->SetPosition(0.985, 0.975);
+    if (auto *renderers = viewer.renderWindow()->GetRenderers()) {
+        renderers->InitTraversal();
+        if (auto *renderer = renderers->GetNextItem()) {
+            renderer->AddActor2D(status_text);
+        }
+    }
+
     std::mutex cloud_mu;
     pcl::PointCloud<pcl::PointXYZI>::Ptr latest_cloud;
     rtabmap::Transform latest_pose;
@@ -1154,6 +1177,12 @@ int main(int argc, char *argv[]) {
             .arg(frame_count)
             .arg(map_points.size())
             .arg(QString::fromStdString(color_mode)));
+
+        // Update localization state overlay
+        bool loc = slam.isLocalized();
+        status_text->SetInput(loc ? "LOCALIZED" : "SEARCHING");
+        if (loc) status_text->GetTextProperty()->SetColor(0.2, 1.0, 0.2);
+        else     status_text->GetTextProperty()->SetColor(1.0, 0.2, 0.2);
 
         viewer.refreshView();
     });
