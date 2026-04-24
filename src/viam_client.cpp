@@ -99,12 +99,10 @@ void ViamClient::cloudLoop() {
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::system_clock::now().time_since_epoch())
                 .count());
-
             auto cloud = parsePCD(result.pc);
             auto t_cb = std::chrono::steady_clock::now();
 
             if (cloud && !cloud->empty()) frame_cb_(cloud, ts_ns);
-            auto t_done = std::chrono::steady_clock::now();
 
             auto ms = [](auto a, auto b) {
                 return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
@@ -115,9 +113,6 @@ void ViamClient::cloudLoop() {
                       << "ms  total=" << ms(t_fetch, t_done) << "ms"
                       << "  pts=" << (cloud ? cloud->size() : 0) << "\n";
         } catch (const std::exception &e) {
-            std::cerr << "[VIAM] get_point_cloud: " << e.what() << " — reconnecting\n";
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            std::lock_guard<std::mutex> lock(machine_mu_);
             reconnect();
         }
 
