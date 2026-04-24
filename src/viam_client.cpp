@@ -33,25 +33,37 @@ ViamClient::ViamClient(const Config &cfg) : cfg_(cfg) {}
 
 ViamClient::~ViamClient() { stop(); }
 
+bool ViamClient::reconnect() {
+    // Must be called with machine_mu_ held.
+    try {
+        machine_ = connect(cfg_);
+        camera_  = machine_->resource_by_name<Camera>(cfg_.lidar_name);
+        if (!cfg_.imu_name.empty())
+            sensor_ = machine_->resource_by_name<MovementSensor>(cfg_.imu_name);
+        if (!cfg_.base_name.empty())
+            base_ = machine_->resource_by_name<Base>(cfg_.base_name);
+        std::cout << "[VIAM] Connected to " << cfg_.address << "\n";
+        return true;
+    } catch (const std::exception &e) {
+        std::cerr << "[VIAM] reconnect failed: " << e.what() << "\n";
+        machine_.reset(); camera_.reset(); sensor_.reset(); base_.reset();
+        return false;
+    }
+}
+
 bool ViamClient::start(FrameCallback frame_cb, IMUCallback imu_cb) {
     frame_cb_ = std::move(frame_cb);
     imu_cb_   = std::move(imu_cb);
 
-    // Verify connectivity and component names before spawning threads.
-    try {
-        auto machine = connect(cfg_);
-        machine->resource_by_name<Camera>(cfg_.lidar_name);
-        std::cout << "[VIAM] Connected to " << cfg_.address << "\n";
-    } catch (const std::exception &e) {
-        std::cerr << "[VIAM] Connection failed: " << e.what() << "\n";
-        return false;
+    {
+        std::lock_guard<std::mutex> lock(machine_mu_);
+        if (!reconnect()) return false;
     }
 
     running_ = true;
     cloud_thread_ = std::thread(&ViamClient::cloudLoop, this);
-    if (imu_cb_ && !cfg_.imu_name.empty()) {
+    if (imu_cb_ && !cfg_.imu_name.empty())
         imu_thread_ = std::thread(&ViamClient::imuLoop, this);
-    }
     return true;
 }
 
@@ -64,40 +76,32 @@ void ViamClient::stop() {
 void ViamClient::cloudLoop() {
     const auto interval = std::chrono::microseconds(1'000'000 / cfg_.cloud_hz);
 
-    std::shared_ptr<RobotClient> machine;
-    std::shared_ptr<Camera> camera;
-
-    auto reconnect = [&]() -> bool {
-        try {
-            machine = connect(cfg_);
-            camera  = machine->resource_by_name<Camera>(cfg_.lidar_name);
-            return true;
-        } catch (const std::exception &e) {
-            std::cerr << "[VIAM] cloud reconnect failed: " << e.what() << "\n";
-            return false;
-        }
-    };
-
-    if (!reconnect()) { running_ = false; return; }
-
     while (running_) {
         auto t0 = std::chrono::steady_clock::now();
 
+        std::shared_ptr<Camera> cam;
+        {
+            std::lock_guard<std::mutex> lock(machine_mu_);
+            cam = camera_;
+            if (!cam && !reconnect()) {
+                std::this_thread::sleep_until(t0 + interval);
+                continue;
+            }
+            cam = camera_;
+        }
+
         try {
-            auto result = camera->get_point_cloud("pointcloud/pcd");
+            auto result = cam->get_point_cloud("pointcloud/pcd");
             uint64_t ts_ns = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::system_clock::now().time_since_epoch())
                 .count());
-
             auto cloud = parsePCD(result.pc);
-            if (cloud && !cloud->empty()) {
-                frame_cb_(cloud, ts_ns);
-            }
+            if (cloud && !cloud->empty()) frame_cb_(cloud, ts_ns);
         } catch (const std::exception &e) {
-            std::cerr << "[VIAM] get_point_cloud: " << e.what()
-                      << " — reconnecting\n";
+            std::cerr << "[VIAM] get_point_cloud: " << e.what() << " — reconnecting\n";
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            std::lock_guard<std::mutex> lock(machine_mu_);
             reconnect();
         }
 
@@ -107,39 +111,31 @@ void ViamClient::cloudLoop() {
 
 void ViamClient::imuLoop() {
     const auto interval = std::chrono::microseconds(1'000'000 / cfg_.imu_hz);
-
-    std::shared_ptr<RobotClient> machine;
-    std::shared_ptr<MovementSensor> sensor;
-
-    auto reconnect = [&]() -> bool {
-        try {
-            machine = connect(cfg_);
-            sensor  = machine->resource_by_name<MovementSensor>(cfg_.imu_name);
-            return true;
-        } catch (const std::exception &e) {
-            std::cerr << "[VIAM] IMU reconnect failed: " << e.what() << "\n";
-            return false;
-        }
-    };
-
-    if (!reconnect()) return;
-
-    constexpr double kDeg2Rad  = M_PI / 180.0;
-    constexpr double kMps2ToG  = 1.0 / 9.80665;
+    constexpr double kDeg2Rad = M_PI / 180.0;
+    constexpr double kMps2ToG = 1.0 / 9.80665;
 
     while (running_) {
         auto t0 = std::chrono::steady_clock::now();
 
+        std::shared_ptr<MovementSensor> sens;
+        {
+            std::lock_guard<std::mutex> lock(machine_mu_);
+            sens = sensor_;
+            if (!sens && !reconnect()) {
+                std::this_thread::sleep_until(t0 + interval);
+                continue;
+            }
+            sens = sensor_;
+        }
+
         try {
             // get_angular_velocity → deg/s; get_linear_acceleration → m/s²
-            auto av = sensor->get_angular_velocity();
-            auto la = sensor->get_linear_acceleration();
-
+            auto av = sens->get_angular_velocity();
+            auto la = sens->get_linear_acceleration();
             uint64_t ts_ns = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::system_clock::now().time_since_epoch())
                 .count());
-
             LivoxIMU imu;
             imu.gyro_x = static_cast<float>(av.x() * kDeg2Rad);
             imu.gyro_y = static_cast<float>(av.y() * kDeg2Rad);
@@ -149,27 +145,15 @@ void ViamClient::imuLoop() {
             imu.acc_y = static_cast<float>(la.y() * kMps2ToG);
             imu.acc_z = static_cast<float>(la.z() * kMps2ToG);
             imu.timestamp_ns = ts_ns;
-
             imu_cb_(imu);
         } catch (const std::exception &e) {
-            std::cerr << "[VIAM] IMU read: " << e.what()
-                      << " — reconnecting\n";
+            std::cerr << "[VIAM] IMU read: " << e.what() << " — reconnecting\n";
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            std::lock_guard<std::mutex> lock(machine_mu_);
             reconnect();
         }
 
         std::this_thread::sleep_until(t0 + interval);
-    }
-}
-
-bool ViamClient::baseReconnect() {
-    try {
-        base_machine_ = connect(cfg_);
-        base_ = base_machine_->resource_by_name<Base>(cfg_.base_name);
-        return true;
-    } catch (const std::exception &e) {
-        std::cerr << "[VIAM] base reconnect failed: " << e.what() << "\n";
-        return false;
     }
 }
 
@@ -183,16 +167,19 @@ void ViamClient::sendBaseVelocity(float linear_mps, float angular_rps) {
     Vector3 angular_vec{};
     angular_vec.set_z(static_cast<double>(angular_rps) * (180.0 / M_PI));
 
-    std::lock_guard<std::mutex> lock(base_mu_);
-    if (!base_ && !baseReconnect()) return;
+    std::shared_ptr<Base> base;
+    {
+        std::lock_guard<std::mutex> lock(machine_mu_);
+        if (!base_ && !reconnect()) return;
+        base = base_;
+    }
 
     try {
-        base_->set_velocity(linear_vec, angular_vec);
+        base->set_velocity(linear_vec, angular_vec);
     } catch (const std::exception &e) {
         std::cerr << "[VIAM] set_velocity failed: " << e.what() << " — reconnecting\n";
-        base_.reset();
-        base_machine_.reset();
-        if (baseReconnect()) {
+        std::lock_guard<std::mutex> lock(machine_mu_);
+        if (reconnect()) {
             try { base_->set_velocity(linear_vec, angular_vec); }
             catch (const std::exception &e2) {
                 std::cerr << "[VIAM] set_velocity retry failed: " << e2.what() << "\n";

@@ -12,6 +12,8 @@
 
 #include <viam/sdk/common/instance.hpp>
 #include <viam/sdk/components/base.hpp>
+#include <viam/sdk/components/camera.hpp>
+#include <viam/sdk/components/movement_sensor.hpp>
 #include <viam/sdk/robot/client.hpp>
 
 #include "livox_receiver.h"  // FrameCallback, IMUCallback, LivoxIMU
@@ -56,13 +58,18 @@ private:
     std::thread cloud_thread_;
     std::thread imu_thread_;
 
-    std::mutex base_mu_;
-    std::shared_ptr<viam::sdk::RobotClient> base_machine_;
-    std::shared_ptr<viam::sdk::Base> base_;
+    // Single shared connection — all loops use these handles.
+    // Protected by machine_mu_; copy the shared_ptr locally before doing I/O.
+    std::mutex machine_mu_;
+    std::shared_ptr<viam::sdk::RobotClient> machine_;
+    std::shared_ptr<viam::sdk::Camera>          camera_;
+    std::shared_ptr<viam::sdk::MovementSensor>  sensor_;
+    std::shared_ptr<viam::sdk::Base>            base_;
 
     void cloudLoop();
     void imuLoop();
-    bool baseReconnect();
+    // Rebuild machine_ + all component handles. Must be called with machine_mu_ held.
+    bool reconnect();
 
     static pcl::PointCloud<pcl::PointXYZI>::Ptr parsePCD(
         const std::vector<uint8_t> &bytes);
