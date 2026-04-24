@@ -115,7 +115,8 @@ bool SlamPipeline::init(const json &config) {
         std::to_string(rtab.value("angular_update", 0.1))});
     // Localization-only mode: match against existing map, don't add new nodes
     // and open the database read-only so the file isn't modified on exit.
-    if (config.value("localize_only", false)) {
+    localize_only_ = config.value("localize_only", false);
+    if (localize_only_) {
         params.insert({rtabmap::Parameters::kMemIncrementalMemory(), "false"});
         params.insert({rtabmap::Parameters::kMemLocalizationReadOnly(), "true"});
     }
@@ -244,6 +245,8 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
         }
     }
 
+    auto t0 = std::chrono::steady_clock::now();
+
     auto xyzi_filtered = pcl::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
     xyzi_filtered->reserve(cloud->size());
     float min_r2 = min_range_ * min_range_;
@@ -258,17 +261,23 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
         *filtered_cloud = xyzi_filtered;
     }
 
+    auto t1 = std::chrono::steady_clock::now();
+
     double stamp = static_cast<double>(timestamp_ns) / 1e9;
     rtabmap::LaserScan scan = rtabmap::util3d::laserScanFromPointCloud(*xyzi_filtered, lidar_to_base_);
     rtabmap::SensorData data(scan, cv::Mat(), cv::Mat(), rtabmap::CameraModel(), 0, stamp);
+
+    auto t2 = std::chrono::steady_clock::now();
 
     rtabmap::Transform pose;
     int nodeId = -1;
     {
         std::lock_guard<std::mutex> lock(slam_mutex_);
+        auto t_lock = std::chrono::steady_clock::now();
 
         rtabmap::OdometryInfo odom_info;
         pose = odom_->process(data, &odom_info);
+        auto t3 = std::chrono::steady_clock::now();
 
         if (pose.isNull()) {
             odom_fail_count_++;
@@ -282,7 +291,7 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
             std::cerr << "\n";
             if (odom_fail_count_ >= odom_fail_reset_threshold_) {
                 std::cerr << "[SLAM] Resetting odometry after " << odom_fail_count_ << " failures\n";
-                odom_->reset();
+                odom_->reset(initial_pose_.isNull() ? rtabmap::Transform() : initial_pose_);
                 odom_fail_count_ = 0;
             }
             return false;
@@ -292,7 +301,19 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
         frame_count_++;
 
         rtabmap_->process(data, pose);
+        auto t4 = std::chrono::steady_clock::now();
         nodeId = rtabmap_->getLastLocationId();
+
+        auto ms = [](auto a, auto b) {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+        };
+        std::cerr << "[SLAM] in=" << xyzi_filtered->size() << "pts"
+                  << "  filter=" << ms(t0, t1) << "ms"
+                  << "  scan=" << ms(t1, t2) << "ms"
+                  << "  slam_lock_wait=" << ms(t2, t_lock) << "ms"
+                  << "  icp=" << ms(t_lock, t3) << "ms"
+                  << "  graph=" << ms(t3, t4) << "ms"
+                  << "\n";
 
         // Store the map-frame pose, not the raw odom pose. In mapping mode
         // mapCorrection is identity so this is a no-op; in localize-only mode
@@ -327,6 +348,8 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
         }
     } // slam_mutex_ released
 
+    auto t5 = std::chrono::steady_clock::now();
+
     // Add local occupancy grid tile — grid_mutex_ only, slam_mutex_ no longer held
     if (nodeId > 0) {
         std::lock_guard<std::mutex> glock(grid_mutex_);
@@ -339,6 +362,11 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
                             grid_maker_.getCellSize(), viewPoint);
         }
     }
+
+    auto t6 = std::chrono::steady_clock::now();
+    auto ms_total = std::chrono::duration_cast<std::chrono::milliseconds>(t6 - t0).count();
+    auto ms_grid  = std::chrono::duration_cast<std::chrono::milliseconds>(t6 - t5).count();
+    std::cerr << "[SLAM] grid=" << ms_grid << "ms  total=" << ms_total << "ms\n";
 
     return true;
 }
@@ -430,36 +458,45 @@ void SlamPipeline::processIMU(float gyro_x, float gyro_y, float gyro_z,
 }
 
 cv::Mat SlamPipeline::getOccupancyGrid(float &xMin, float &yMin, float &cellSize) {
-    // Snapshot current session poses under slam_mutex_ only
+    if (localize_only_) {
+        // Map is frozen — grid was fully assembled by loadMap(). Return cached result
+        // without touching slam_mutex_ or re-running occ_grid_->update().
+        std::lock_guard<std::mutex> glock(grid_mutex_);
+        if (!occ_grid_) return cv::Mat();
+        cellSize = occ_grid_->getCellSize();
+        return occ_grid_->getMap(xMin, yMin);
+    }
+
+    // Mapping mode: snapshot current session poses (new nodes may exist) under slam_mutex_
     std::map<int, rtabmap::Transform> current_poses;
+    auto t_graph_start = std::chrono::steady_clock::now();
     {
         std::lock_guard<std::mutex> lock(slam_mutex_);
         if (!rtabmap_) return cv::Mat();
         std::multimap<int, rtabmap::Link> constraints;
         rtabmap_->getGraph(current_poses, constraints, /*optimized=*/true, /*global=*/true);
-        if (current_poses.empty()) {
+        if (current_poses.empty())
             rtabmap_->getGraph(current_poses, constraints, /*optimized=*/false, /*global=*/true);
-        }
     } // slam_mutex_ released
+    auto t_graph_done = std::chrono::steady_clock::now();
 
-    // Assemble and update grid under grid_mutex_ only
     std::lock_guard<std::mutex> glock(grid_mutex_);
     if (!occ_grid_) return cv::Mat();
 
-    // Start with loaded map poses, overlay current session on top
     std::map<int, rtabmap::Transform> poses = loaded_poses_;
     for (auto &[id, p] : current_poses) poses[id] = p;
 
+    auto t_update_start = std::chrono::steady_clock::now();
     occ_grid_->update(poses);
+    auto t_update_done = std::chrono::steady_clock::now();
     cv::Mat result = occ_grid_->getMap(xMin, yMin);
 
-    static bool grid_debug_printed = false;
-    if (!grid_debug_printed) {
-        grid_debug_printed = true;
-        std::cout << "[GRID] poses=" << poses.size()
-                  << " cache=" << grid_cache_.size()
-                  << " map=" << result.cols << "x" << result.rows << "\n";
-    }
+    auto ms = [](auto a, auto b) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+    };
+    std::cerr << "[GRID] poses=" << poses.size()
+              << "  getGraph=" << ms(t_graph_start, t_graph_done) << "ms"
+              << "  grid_update=" << ms(t_update_start, t_update_done) << "ms\n";
 
     cellSize = occ_grid_->getCellSize();
     return result;

@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""Peek at the contents of an RTAB-Map SQLite database.
+
+Usage:
+  tools/peek-db path/to/map.db
+"""
+
+import argparse
+import datetime
+import math
+import os
+import sqlite3
+import struct
+import sys
+
+
+# ICP / odometry parameters worth surfacing at a glance
+INTERESTING_PARAMS = [
+    "Icp/CorrespondenceRatio",
+    "Icp/Epsilon",
+    "Icp/FiltersEnabled",
+    "Icp/Iterations",
+    "Icp/MaxCorrespondenceDistance",
+    "Icp/OutlierRatio",
+    "Icp/PointToPlane",
+    "Icp/PointToPlaneGroundNormalsUp",
+    "Icp/PointToPlaneK",
+    "Icp/PointToPlaneMinComplexity",
+    "Icp/ReciprocalCorrespondences",
+    "Icp/VoxelSize",
+    "Odom/FilteringStrategy",
+    "Odom/GuessMotion",
+    "Odom/Holonomic",
+    "Odom/KalmanMeasurementNoise",
+    "Odom/KalmanProcessNoise",
+    "Odom/Strategy",
+    "OdomF2M/ScanMaxSize",
+    "OdomF2M/ScanSubtractRadius",
+    "RGBD/ForceOdom3DoF",
+    "RGBD/ProximityBySpace",
+    "Grid/RangeMax",
+    "Grid/RangeMin",
+]
+
+SCAN_FORMAT_NAMES = {
+    0: "Unknown",
+    1: "XY",
+    2: "XYAngle",
+    3: "XYIANGLE",
+    4: "XYI",
+    5: "XYZ",
+    6: "XYZI",
+    7: "XYZRGB",
+    8: "XYZNormal",
+    9: "XYZINormal",
+    10: "XYZRGBNormal",
+    11: "XYZIT",
+}
+
+
+def decode_scan_info(blob):
+    """Decode a 76-byte scan_info blob.
+
+    Layout (all little-endian):
+      float[0]    : format enum (stored as float)
+      float[1]    : maxPoints (stored as float, 0 = unlimited)
+      float[2]    : rangeMax (m)
+      float[3]    : rangeMin (m)
+      float[4]    : angleMin (rad, 0 for 3-D scans)
+      float[5]    : angleMax (rad, 0 for 3-D scans)
+      float[6]    : angleIncrement (rad, 0 for 3-D scans)
+      float[7-18] : local transform, row-major 3×4 [R|t]
+    """
+    if not blob or len(blob) < 76:
+        return None
+    vals = struct.unpack("<19f", blob[:76])
+    fmt_id = int(round(vals[0]))
+    max_pts = int(round(vals[1]))
+    range_max = vals[2]
+    range_min = vals[3]
+    tf = vals[7:19]  # 3×4 rotation+translation, row-major
+
+    # Extract translation
+    tx, ty, tz = tf[3], tf[7], tf[11]
+
+    # Extract Euler angles from rotation matrix (ZYX / yaw-pitch-roll)
+    r = tf
+    yaw = math.atan2(r[4], r[0])
+    pitch = math.atan2(-r[8], math.sqrt(r[9] ** 2 + r[10] ** 2))
+    roll = math.atan2(r[9], r[10])
+
+    is_identity = (
+        abs(tx) < 1e-5
+        and abs(ty) < 1e-5
+        and abs(tz) < 1e-5
+        and abs(roll) < 1e-5
+        and abs(pitch) < 1e-5
+        and abs(yaw) < 1e-5
+    )
+
+    return {
+        "format_id": fmt_id,
+        "format_name": SCAN_FORMAT_NAMES.get(fmt_id, f"unknown({fmt_id})"),
+        "max_points": max_pts,
+        "range_min": range_min,
+        "range_max": range_max,
+        "tx": tx, "ty": ty, "tz": tz,
+        "roll": roll, "pitch": pitch, "yaw": yaw,
+        "is_identity": is_identity,
+        "matrix": tf,
+    }
+
+
+def ts_to_str(stamp):
+    if stamp is None or stamp == 0:
+        return "—"
+    try:
+        return datetime.datetime.fromtimestamp(stamp).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return str(stamp)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Peek at an RTAB-Map database")
+    ap.add_argument("db", help="Path to .db file")
+    args = ap.parse_args()
+
+    if not os.path.exists(args.db):
+        sys.exit(f"File not found: {args.db}")
+
+    size_mb = os.path.getsize(args.db) / 1024 / 1024
+    mtime = datetime.datetime.fromtimestamp(os.path.getmtime(args.db))
+
+    conn = sqlite3.connect(args.db)
+
+    # ── Sessions ──────────────────────────────────────────────────────────────
+    sessions = conn.execute(
+        "SELECT map_id, COUNT(*), MIN(stamp), MAX(stamp) FROM Node GROUP BY map_id ORDER BY COUNT(*) DESC"
+    ).fetchall()
+    total_nodes = sum(n for _, n, _, _ in sessions)
+
+    print(f"\nDatabase : {args.db}")
+    print(f"Size     : {size_mb:.1f} MB    Modified: {mtime.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Sessions : {len(sessions)}    Nodes: {total_nodes}")
+    print()
+    print(f"  {'map_id':>6}  {'nodes':>6}  {'from':>19}  {'to':>19}")
+    print("  " + "-" * 55)
+    for map_id, n, t_min, t_max in sessions:
+        print(f"  {map_id:>6}  {n:>6}  {ts_to_str(t_min):>19}  {ts_to_str(t_max):>19}")
+
+    # ── Links (loop closures) ─────────────────────────────────────────────────
+    link_rows = conn.execute(
+        "SELECT type, COUNT(*) FROM Link GROUP BY type ORDER BY type"
+    ).fetchall()
+    if link_rows:
+        # RTAB-Map link types: 0=neighbor, 1=neighbor_merged, 2=global_closure, 3=local_closure, etc.
+        TYPE_NAMES = {0: "neighbor", 1: "neighbor_merged", 2: "loop_global",
+                      3: "loop_local", 4: "user", 5: "virtual", 6: "landmark", 7: "proximity"}
+        print()
+        print("Links:")
+        for ltype, count in link_rows:
+            name = TYPE_NAMES.get(ltype, f"type_{ltype}")
+            print(f"  {name:<20} {count:>6}")
+
+    # ── Stored build parameters ───────────────────────────────────────────────
+    info_row = conn.execute(
+        "SELECT parameters FROM Info ORDER BY time_enter DESC LIMIT 1"
+    ).fetchone()
+    if info_row and info_row[0]:
+        param_map = {}
+        for entry in info_row[0].split(";"):
+            entry = entry.strip()
+            if ":" in entry:
+                k, v = entry.split(":", 1)
+                param_map[k.strip()] = v.strip()
+
+        print()
+        print("Build parameters:")
+        width = max(len(k) for k in INTERESTING_PARAMS)
+        for key in INTERESTING_PARAMS:
+            if key in param_map:
+                print(f"  {key:<{width}}  {param_map[key]}")
+
+    # ── Scan extrinsics ───────────────────────────────────────────────────────
+    scan_row = conn.execute("SELECT scan_info FROM Data LIMIT 1").fetchone()
+    if scan_row and scan_row[0]:
+        info = decode_scan_info(scan_row[0])
+        if info:
+            print()
+            print("Scan info (first node):")
+            print(f"  Format    : {info['format_name']} (id={info['format_id']})")
+            if info["max_points"]:
+                print(f"  Max pts   : {info['max_points']}")
+            if info["range_max"] > 0:
+                print(f"  Range     : {info['range_min']:.2f} – {info['range_max']:.2f} m")
+            if info["is_identity"]:
+                print("  Extrinsics: identity (sensor = base_link)")
+            else:
+                print(f"  Extrinsics:")
+                print(f"    translation : x={info['tx']:.4f}  y={info['ty']:.4f}  z={info['tz']:.4f} m")
+                print(f"    rotation    : roll={info['roll']:.4f}  pitch={info['pitch']:.4f}  yaw={info['yaw']:.4f} rad")
+                m = info["matrix"]
+                print(f"    matrix (3×4): [{m[0]:.3f}  {m[1]:.3f}  {m[2]:.3f} | {m[3]:.4f}]")
+                print(f"                  [{m[4]:.3f}  {m[5]:.3f}  {m[6]:.3f} | {m[7]:.4f}]")
+                print(f"                  [{m[8]:.3f}  {m[9]:.3f}  {m[10]:.3f} | {m[11]:.4f}]")
+
+    print()
+    conn.close()
+
+
+if __name__ == "__main__":
+    main()

@@ -546,7 +546,9 @@ int main(int argc, char *argv[]) {
     // Build data source start/stop for live modes (Livox or Viam)
     std::function<bool(FrameCallback, IMUCallback)> source_start;
     std::function<void()> source_stop;
+    std::atomic<bool> motors_enabled{config.value("base_control_enabled", false)};
     std::function<void(float, float)> nav_vel_cb; // set below if Viam base is configured
+    std::function<void()> send_stop_fn;           // sends 0,0 regardless of motors_enabled
 
     if (data_source == "viam") {
 #ifdef HAVE_VIAM_SDK
@@ -572,7 +574,10 @@ int main(int argc, char *argv[]) {
         source_start = [client](FrameCallback f, IMUCallback i) { return client->start(f, i); };
         source_stop  = [client]() { client->stop(); };
         if (!vcfg.base_name.empty()) {
-            nav_vel_cb = [client](float l, float a) { client->sendBaseVelocity(l, a); };
+            nav_vel_cb   = [client, &motors_enabled](float l, float a) {
+                if (motors_enabled) client->sendBaseVelocity(l, a);
+            };
+            send_stop_fn = [client]() { client->sendBaseVelocity(0.0f, 0.0f); };
         }
 #else
         std::cerr << "data_source=viam but HAVE_VIAM_SDK not compiled in.\n"
@@ -682,7 +687,22 @@ int main(int argc, char *argv[]) {
         std::cout << "[VIEWER] Loading " << load_map_desc << "\n";
         auto rebuilt = slam.loadMap(load_map_id);
         if (rebuilt->size() > 0) {
-            std::cout << "[VIEWER] Loaded " << rebuilt->size() << " points\n";
+            // Downsample to map_voxel_size immediately so the first render tick
+            // doesn't iterate over millions of raw points.
+            if (map_voxel > 0 && rebuilt->size() > 100000) {
+                rebuilt->width = rebuilt->size(); rebuilt->height = 1;
+                pcl::VoxelGrid<pcl::PointXYZI> vg;
+                vg.setInputCloud(rebuilt);
+                vg.setLeafSize(map_voxel, map_voxel, map_voxel);
+                auto ds = pcl::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+                vg.filter(*ds);
+                std::cout << "[VIEWER] Loaded " << rebuilt->size()
+                          << " pts → downsampled to " << ds->size() << " pts\n";
+                rebuilt = ds;
+            } else {
+                std::cout << "[VIEWER] Loaded " << rebuilt->size() << " points\n";
+            }
+            map_points.reserve(rebuilt->size());
             for (const auto &p : *rebuilt) {
                 map_points.push_back({p.x, p.y, p.z, p.intensity, 0});
             }
@@ -694,10 +714,14 @@ int main(int argc, char *argv[]) {
             pcl::PointCloud<pcl::PointXYZI>::Ptr filtered;
             bool success = slam.processCloud(cloud, ts, &filtered);
             if (success) {
+                auto t_wait = std::chrono::steady_clock::now();
                 std::lock_guard<std::mutex> lock(cloud_mu);
+                auto t_got = std::chrono::steady_clock::now();
                 latest_cloud = filtered ? filtered : cloud;
                 latest_pose = slam.getPose();
                 frame_count++;
+                long wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_got - t_wait).count();
+                std::cerr << "[CB] cloud_mu wait=" << wait_ms << "ms\n";
             }
         },
         [&](const LivoxIMU &imu) {
@@ -814,14 +838,21 @@ int main(int argc, char *argv[]) {
     grid_view->viewport()->installEventFilter(new WheelFilter(grid_view, &grid_win));
 
     // Buttons
-    auto *btn_row   = new QHBoxLayout;
-    auto *clear_btn = new QPushButton("Clear Waypoints");
-    auto *begin_btn = new QPushButton("Begin Navigation");
-    auto *stop_btn  = new QPushButton("Stop Navigation");
+    auto *btn_row    = new QHBoxLayout;
+    auto *clear_btn  = new QPushButton("Clear Waypoints");
+    auto *begin_btn  = new QPushButton("Begin Navigation");
+    auto *stop_btn   = new QPushButton("Stop Navigation");
+    QPushButton *motors_btn = nullptr;
+    if (nav_vel_cb) {
+        motors_btn = new QPushButton(motors_enabled ? "Motors: ON" : "Motors: OFF");
+        motors_btn->setCheckable(true);
+        motors_btn->setChecked(motors_enabled.load());
+    }
     stop_btn->setEnabled(false);
     btn_row->addWidget(clear_btn);
     btn_row->addWidget(begin_btn);
     btn_row->addWidget(stop_btn);
+    if (motors_btn) btn_row->addWidget(motors_btn);
 
     grid_vbox->addWidget(grid_view);
     grid_vbox->addLayout(btn_row);
@@ -981,6 +1012,17 @@ int main(int argc, char *argv[]) {
         stop_btn->setEnabled(false);
     });
 
+    // Motors enable/disable toggle
+    if (motors_btn) {
+        QObject::connect(motors_btn, &QPushButton::clicked, [&, motors_btn](bool checked) {
+            motors_enabled.store(checked);
+            motors_btn->setText(checked ? "Motors: ON" : "Motors: OFF");
+            // Dispatch stop off the main thread — sendBaseVelocity is a blocking gRPC call
+            if (!checked && send_stop_fn)
+                std::thread([sf = send_stop_fn]() { sf(); }).detach();
+        });
+    }
+
     // Poll navigator state to re-enable buttons when it finishes naturally
     QTimer nav_poll;
     QObject::connect(&nav_poll, &QTimer::timeout, [&]() {
@@ -1057,7 +1099,9 @@ int main(int argc, char *argv[]) {
     QObject::connect(&update_timer, &QTimer::timeout, [&]() {
         if (!running) { app.quit(); return; }
 
+        auto t_lock_req = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> lock(cloud_mu);
+        auto t_lock_got = std::chrono::steady_clock::now();
         if (!latest_cloud) return;
 
         max_frame_id = frame_count;
@@ -1081,6 +1125,7 @@ int main(int argc, char *argv[]) {
         trajectory_xz.push_back({tx, ty});
 
         // Voxel downsample periodically — before building display cloud
+        auto t_pre_voxel = std::chrono::steady_clock::now();
         if (frame_count % downsample_interval == 0 && map_points.size() > 100000) {
             auto xyzi = pcl::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
             xyzi->reserve(map_points.size());
@@ -1104,6 +1149,7 @@ int main(int argc, char *argv[]) {
                 map_points.push_back({p.x, p.y, p.z, p.intensity, frame_count});
             }
         }
+        auto t_post_voxel = std::chrono::steady_clock::now();
 
         // Build colored cloud for display (single code path, always from map_points)
         auto display_cloud = pcl::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
@@ -1142,6 +1188,7 @@ int main(int argc, char *argv[]) {
         }
         display_cloud->width = display_cloud->size();
         display_cloud->height = 1;
+        auto t_post_build = std::chrono::steady_clock::now();
 
         viewer.addCloud("map", display_cloud);
         viewer.setCloudPointSize("map", map_point_size);
@@ -1177,6 +1224,17 @@ int main(int argc, char *argv[]) {
         }
 
         latest_cloud.reset();
+
+        auto t_done = std::chrono::steady_clock::now();
+        auto ms = [](auto a, auto b) {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+        };
+        std::cerr << "[RENDER] map_pts=" << map_points.size()
+                  << "  lock_wait=" << ms(t_lock_req, t_lock_got) << "ms"
+                  << "  voxel=" << ms(t_pre_voxel, t_post_voxel) << "ms"
+                  << "  build=" << ms(t_post_voxel, t_post_build) << "ms"
+                  << "  vtk=" << ms(t_post_build, t_done) << "ms"
+                  << "  total_held=" << ms(t_lock_got, t_done) << "ms\n";
 
         viewer.setWindowTitle(QString("Livox SLAM | Frame %1 | Map: %2 pts | %3")
             .arg(frame_count)

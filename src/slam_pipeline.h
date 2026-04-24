@@ -109,6 +109,8 @@ private:
     std::atomic<float> current_accel_{0};
     std::atomic<double> last_high_accel_time_{0};
 
+    bool localize_only_ = false;
+
     // Consecutive odometry failure tracking — reset odometry after too many failures
     int odom_fail_count_ = 0;
     int odom_fail_reset_threshold_ = 5;
