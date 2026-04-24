@@ -12,10 +12,13 @@
   "use_imu_prior": false,
   "load_map": "largest",
   "localize_only": true,
-  "initial_pose": null,
+  "initial_pose": {
+    "x": 1.5, "y": 0.0, "z": 0.0,
+    "roll": 0.0, "pitch": 0.0, "yaw": 1.8
+  },
   "extrinsics": {
-    "x": 0.3, "y": 0.45, "z": 0.0,
-    "roll": 0.0, "pitch": 0.0, "yaw": 1.5708
+    "x": 0.45, "y": 0.0, "z": 0.0,
+    "roll": 0.0, "pitch": 0.0, "yaw": 0.0
   },
   "min_range": 2,
   "max_range": 12,
@@ -51,8 +54,8 @@
     "point_to_plane_ground_normals_up": 0.8,
     "point_to_plane_min_complexity": 0.02,
     "voxel_size": 0.03,
-    "max_correspondence_distance": 0.4,
-    "correspondence_ratio": 0.15,
+    "max_correspondence_distance": 0.1,
+    "correspondence_ratio": 0.25,
     "reciprocal_correspondences": true,
     "iterations": 40,
     "epsilon": 0.0005,
