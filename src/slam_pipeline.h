@@ -60,6 +60,11 @@ public:
     // matched a loaded-map node). Latches — doesn't flip back on drift.
     bool isLocalized() const;
 
+    // The last map node we loop-closed to. Returns (-1, null transform) if
+    // no match has happened yet. The pose is the node's optimized pose in
+    // the map frame, suitable for rendering directly in the viewer.
+    std::pair<int, rtabmap::Transform> getLastLoopClosure() const;
+
     // Reconstruct accumulated map from database and populate the occupancy grid cache.
     // map_id = -1 loads all sessions; otherwise only that session.
     pcl::PointCloud<pcl::PointXYZI>::Ptr loadMap(int map_id = -1);
@@ -88,6 +93,11 @@ private:
     // set to a non-identity transform by rtabmap. Tracked so we can log
     // transitions (SEARCHING → LOCALIZED → LOST) instead of silently drifting.
     bool localized_ = false;
+    // Latched last successful loop closure: node id in the loaded DB and its
+    // pose in the map frame (looked up from loaded_poses_). -1 / null until
+    // first match. Protected by slam_mutex_.
+    int last_closure_id_ = -1;
+    rtabmap::Transform last_closure_pose_;
 
     // Guards odom_, rtabmap_, current_pose_, frame_count_
     mutable std::mutex slam_mutex_;

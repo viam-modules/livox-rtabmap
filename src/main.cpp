@@ -1189,6 +1189,17 @@ int main(int argc, char *argv[]) {
         if (loc) status_text->GetTextProperty()->SetColor(0.2, 1.0, 0.2);
         else     status_text->GetTextProperty()->SetColor(1.0, 0.2, 0.2);
 
+        // Highlight the last matched map node as a yellow sphere and draw a
+        // line from our current pose to it, so you can see which node is
+        // anchoring localization.
+        auto [closure_id, closure_pose] = slam.getLastLoopClosure();
+        if (closure_id > 0 && !closure_pose.isNull()) {
+            viewer.addOrUpdateSphere("closure_node", closure_pose, 0.3f,
+                                     QColor(255, 255, 0), /*foreground*/true);
+            viewer.addOrUpdateLine("closure_link", latest_pose, closure_pose,
+                                   QColor(255, 255, 0), /*arrow*/false, /*foreground*/true);
+        }
+
         viewer.refreshView();
     });
     update_timer.start(33);

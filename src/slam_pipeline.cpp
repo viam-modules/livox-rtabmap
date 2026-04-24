@@ -316,6 +316,17 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
                       << rtabmap_->getLoopClosureValue() << ")\n";
         }
 
+        // Cache matched node pose (from loaded_poses_) for viewer rendering.
+        // Lock order: slam_mutex_ (held) → grid_mutex_, matches loadMap.
+        if (loop_id > 0) {
+            std::lock_guard<std::mutex> glock(grid_mutex_);
+            auto it = loaded_poses_.find(loop_id);
+            if (it != loaded_poses_.end()) {
+                last_closure_id_ = loop_id;
+                last_closure_pose_ = it->second;
+            }
+        }
+
         if (frame_count_ % 10 == 0) {
             std::cout << "[SLAM] Frame " << frame_count_
                       << " | " << (localized_ ? "LOCALIZED" : "SEARCHING")
@@ -397,6 +408,11 @@ rtabmap::Transform SlamPipeline::getPose() const {
 bool SlamPipeline::isLocalized() const {
     std::lock_guard<std::mutex> lock(slam_mutex_);
     return localized_;
+}
+
+std::pair<int, rtabmap::Transform> SlamPipeline::getLastLoopClosure() const {
+    std::lock_guard<std::mutex> lock(slam_mutex_);
+    return {last_closure_id_, last_closure_pose_};
 }
 
 std::vector<std::pair<float,float>> SlamPipeline::getTrajectory() const {
