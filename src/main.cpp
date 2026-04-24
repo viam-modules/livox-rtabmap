@@ -124,6 +124,7 @@ int main(int argc, char *argv[]) {
     int downsample_interval = config.value("map_downsample_interval", 50);
     std::string color_mode = config.value("color_mode", "intensity");
     bool show_trajectory = config.value("show_trajectory", true);
+    bool show_local_map = config.value("show_local_map", false);
     int map_add_interval = config.value("map_add_interval", 1);
     bool add_scans_to_map = config.value("add_scans_to_map", true);
 
@@ -720,6 +721,7 @@ int main(int argc, char *argv[]) {
             json new_config = json::parse(rf);
             map_add_interval = new_config.value("map_add_interval", map_add_interval);
             add_scans_to_map = new_config.value("add_scans_to_map", add_scans_to_map);
+            show_local_map = new_config.value("show_local_map", show_local_map);
             map_voxel = new_config.value("map_voxel_size", map_voxel);
             downsample_interval = new_config.value("map_downsample_interval", downsample_interval);
             color_mode = new_config.value("color_mode", color_mode);
@@ -1158,6 +1160,31 @@ int main(int argc, char *argv[]) {
         scan_rgb->width = scan_rgb->size(); scan_rgb->height = 1;
         viewer.addCloud("scan", scan_rgb, latest_pose);
         viewer.setCloudPointSize("scan", scan_point_size);
+
+        // Draw F2M local map (odometry's rolling reference) — the cloud ICP
+        // actually matches each new scan against. Rendered in odom frame,
+        // then transformed to map frame via the current correction so it
+        // overlays correctly with the loaded map. Blue, small points.
+        if (show_local_map) {
+            auto local = slam.getLocalMap();
+            if (local && !local->empty()) {
+                auto local_rgb = pcl::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
+                local_rgb->reserve(local->size());
+                for (const auto &p : *local) {
+                    pcl::PointXYZRGB rp;
+                    rp.x = p.x; rp.y = p.y; rp.z = p.z;
+                    rp.r = 80; rp.g = 150; rp.b = 255; // blue
+                    local_rgb->push_back(rp);
+                }
+                local_rgb->width = local_rgb->size(); local_rgb->height = 1;
+                viewer.addCloud("local_map", local_rgb, slam.getMapCorrection());
+                viewer.setCloudPointSize("local_map", 1);
+            } else {
+                viewer.removeCloud("local_map");
+            }
+        } else {
+            viewer.removeCloud("local_map");
+        }
 
         // Draw trajectory
         if (show_trajectory && trajectory_xz.size() > 1) {

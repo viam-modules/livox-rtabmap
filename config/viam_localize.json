@@ -44,6 +44,7 @@
   "scan_point_size": 2,
   "camera_distance": 15.0,
   "show_trajectory": true,
+  "show_local_map": false,
   "icp": {
     "odom_strategy": 0,
     "filtering_strategy": 1,

@@ -65,6 +65,15 @@ public:
     // the map frame, suitable for rendering directly in the viewer.
     std::pair<int, rtabmap::Transform> getLastLoopClosure() const;
 
+    // The F2M odometry's rolling local map — the reference cloud odometry
+    // ICPs each new scan against. Returned in odom frame. Empty if odometry
+    // isn't F2M (odom_strategy != 0) or hasn't accumulated scans yet.
+    pcl::PointCloud<pcl::PointXYZI>::Ptr getLocalMap() const;
+
+    // Odom→map transform applied by rtabmap during localization.
+    // Identity until localization locks on.
+    rtabmap::Transform getMapCorrection() const;
+
     // Reconstruct accumulated map from database and populate the occupancy grid cache.
     // map_id = -1 loads all sessions; otherwise only that session.
     pcl::PointCloud<pcl::PointXYZI>::Ptr loadMap(int map_id = -1);

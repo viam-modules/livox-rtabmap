@@ -14,6 +14,7 @@
 #include <rtabmap/core/Link.h>
 #include <rtabmap/core/IMU.h>
 #include <rtabmap/core/util3d.h>
+#include <rtabmap/core/odometry/OdometryF2M.h>
 #include <rtabmap/utilite/ULogger.h>
 
 #include <opencv2/core.hpp>
@@ -428,6 +429,38 @@ bool SlamPipeline::isLocalized() const {
 std::pair<int, rtabmap::Transform> SlamPipeline::getLastLoopClosure() const {
     std::lock_guard<std::mutex> lock(slam_mutex_);
     return {last_closure_id_, last_closure_pose_};
+}
+
+pcl::PointCloud<pcl::PointXYZI>::Ptr SlamPipeline::getLocalMap() const {
+    auto out = pcl::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+    std::lock_guard<std::mutex> lock(slam_mutex_);
+    if (!odom_) return out;
+    auto *f2m = dynamic_cast<const rtabmap::OdometryF2M *>(odom_.get());
+    if (!f2m) return out; // only F2M maintains a rolling local map
+
+    const rtabmap::Signature &sig = f2m->getMap();
+    rtabmap::LaserScan scan = sig.sensorData().laserScanRaw();
+    if (scan.isEmpty()) return out;
+
+    // util3d gives us XYZ; copy into XYZI with intensity=128.
+    pcl::PointCloud<pcl::PointXYZ>::Ptr xyz =
+        rtabmap::util3d::laserScanToPointCloud(scan);
+    out->reserve(xyz->size());
+    for (const auto &p : *xyz) {
+        pcl::PointXYZI pi;
+        pi.x = p.x; pi.y = p.y; pi.z = p.z;
+        pi.intensity = 128.0f;
+        out->push_back(pi);
+    }
+    out->width = out->size();
+    out->height = 1;
+    return out;
+}
+
+rtabmap::Transform SlamPipeline::getMapCorrection() const {
+    std::lock_guard<std::mutex> lock(slam_mutex_);
+    if (!rtabmap_) return rtabmap::Transform::getIdentity();
+    return rtabmap_->getMapCorrection();
 }
 
 std::vector<std::pair<float,float>> SlamPipeline::getTrajectory() const {
