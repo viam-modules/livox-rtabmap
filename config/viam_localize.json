@@ -13,6 +13,7 @@
   "use_imu_prior": false,
   "load_map": "largest",
   "localize_only": true,
+  "start_at_origin": true,
   "initial_pose": {
     "x": 1.5, "y": 0.0, "z": 0.0,
     "roll": 0.0, "pitch": 0.0, "yaw": 1.8

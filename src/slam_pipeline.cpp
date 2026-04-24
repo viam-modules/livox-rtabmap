@@ -118,13 +118,18 @@ bool SlamPipeline::init(const json &config) {
     if (config.value("localize_only", false)) {
         params.insert({rtabmap::Parameters::kMemIncrementalMemory(), "false"});
         params.insert({rtabmap::Parameters::kMemLocalizationReadOnly(), "true"});
-        // RGBD/StartAtOrigin defaults to false, which means rtabmap restores
-        // the last-saved localization pose from the previous session on init —
-        // that overrides our setInitialPose() call. When the user has
-        // supplied an initial_pose, prefer it over the stored last-pose.
-        if (config.contains("initial_pose") && !config["initial_pose"].is_null()) {
-            params.insert({rtabmap::Parameters::kRGBDStartAtOrigin(), "true"});
-        }
+        // start_at_origin (RGBD/StartAtOrigin):
+        //   true  — ignore the last-saved localization pose from the DB.
+        //           Needed for setInitialPose() (from initial_pose config) to
+        //           actually stick; otherwise rtabmap snaps the correction back
+        //           to the stored pose on the first frame.
+        //   false — restore the last-saved pose (rtabmap's default).
+        // Default: true when initial_pose is configured, false otherwise.
+        bool default_start_at_origin =
+            config.contains("initial_pose") && !config["initial_pose"].is_null();
+        bool start_at_origin = config.value("start_at_origin", default_start_at_origin);
+        params.insert({rtabmap::Parameters::kRGBDStartAtOrigin(),
+                       start_at_origin ? "true" : "false"});
     }
 
     odom_.reset(rtabmap::Odometry::create(params));
