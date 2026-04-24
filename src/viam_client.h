@@ -3,6 +3,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -10,6 +11,10 @@
 #include <pcl/point_types.h>
 
 #include <viam/sdk/common/instance.hpp>
+#include <viam/sdk/components/base.hpp>
+#include <viam/sdk/components/camera.hpp>
+#include <viam/sdk/components/movement_sensor.hpp>
+#include <viam/sdk/robot/client.hpp>
 
 #include "livox_receiver.h"  // FrameCallback, IMUCallback, LivoxIMU
 
@@ -26,6 +31,7 @@ public:
         std::string api_key_id;   // fallback if VIAM_API_KEY_ID not set
         std::string lidar_name;   // Camera component name for pointcloud
         std::string imu_name;     // MovementSensor component name ("" = disabled)
+        std::string base_name;    // Base component name ("" = no base control)
         int cloud_hz = 10;        // target pointcloud poll rate (Hz)
         int imu_hz = 100;         // target IMU poll rate (Hz)
     };
@@ -36,6 +42,9 @@ public:
     // Start polling. Returns false if the initial connection fails.
     bool start(FrameCallback frame_cb, IMUCallback imu_cb = nullptr);
     void stop();
+
+    // Send a velocity command to the base component. No-op if base_name is empty.
+    void sendBaseVelocity(float linear_mps, float angular_rps);
 
 private:
     // Instance MUST be the first member: constructed before any SDK objects,
@@ -49,8 +58,18 @@ private:
     std::thread cloud_thread_;
     std::thread imu_thread_;
 
+    // Single shared connection — all loops use these handles.
+    // Protected by machine_mu_; copy the shared_ptr locally before doing I/O.
+    std::mutex machine_mu_;
+    std::shared_ptr<viam::sdk::RobotClient> machine_;
+    std::shared_ptr<viam::sdk::Camera>          camera_;
+    std::shared_ptr<viam::sdk::MovementSensor>  sensor_;
+    std::shared_ptr<viam::sdk::Base>            base_;
+
     void cloudLoop();
     void imuLoop();
+    // Rebuild machine_ + all component handles. Must be called with machine_mu_ held.
+    bool reconnect();
 
     static pcl::PointCloud<pcl::PointXYZI>::Ptr parsePCD(
         const std::vector<uint8_t> &bytes);

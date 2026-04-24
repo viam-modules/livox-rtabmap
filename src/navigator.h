@@ -25,7 +25,8 @@ public:
     ~Navigator();
 
     void setWaypoints(const std::vector<std::pair<float, float>> &waypoints);
-    bool start(std::function<rtabmap::Transform()> get_pose);
+    bool start(std::function<rtabmap::Transform()> get_pose,
+               std::function<void(float, float)> vel_cb = nullptr);
     void stop();
     bool isRunning() const { return running_; }
 
@@ -35,6 +36,7 @@ private:
     Config cfg_;
     std::vector<std::pair<float, float>> waypoints_;
     std::function<rtabmap::Transform()> get_pose_;
+    std::function<void(float, float)> vel_cb_;
     std::atomic<bool> running_{false};
     std::thread thread_;
 };

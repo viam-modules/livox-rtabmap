@@ -15,9 +15,11 @@ void Navigator::setWaypoints(const std::vector<std::pair<float, float>> &waypoin
     waypoints_ = waypoints;
 }
 
-bool Navigator::start(std::function<rtabmap::Transform()> get_pose) {
+bool Navigator::start(std::function<rtabmap::Transform()> get_pose,
+                      std::function<void(float, float)> vel_cb) {
     if (running_ || waypoints_.empty()) return false;
     get_pose_ = std::move(get_pose);
+    vel_cb_   = std::move(vel_cb);
     running_ = true;
     thread_ = std::thread(&Navigator::loop, this);
     return true;
@@ -88,14 +90,16 @@ void Navigator::loop() {
                   << " heading_err=" << std::setprecision(2) << heading_error << "rad"
                   << " → linear=" << linear << " angular=" << angular << "\n";
 
+        if (vel_cb_) vel_cb_(linear, angular);
+
         std::this_thread::sleep_until(t0 + interval);
     }
 
     if (running_) {
         std::cout << "[NAV] All waypoints reached. Stopping.\n";
-        std::cout << "[NAV] CMD final → linear=0 angular=0\n";
     } else {
-        std::cout << "[NAV] Stopped by user. CMD → linear=0 angular=0\n";
+        std::cout << "[NAV] Stopped by user.\n";
     }
+    if (vel_cb_) vel_cb_(0.0f, 0.0f);
     running_ = false;
 }
