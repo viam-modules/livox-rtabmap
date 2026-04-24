@@ -14,6 +14,7 @@
 #include <rtabmap/core/Link.h>
 #include <rtabmap/core/IMU.h>
 #include <rtabmap/core/util3d.h>
+#include <rtabmap/core/odometry/OdometryF2M.h>
 #include <rtabmap/utilite/ULogger.h>
 
 #include <opencv2/core.hpp>
@@ -119,6 +120,18 @@ bool SlamPipeline::init(const json &config) {
     if (localize_only_) {
         params.insert({rtabmap::Parameters::kMemIncrementalMemory(), "false"});
         params.insert({rtabmap::Parameters::kMemLocalizationReadOnly(), "true"});
+        // start_at_origin (RGBD/StartAtOrigin):
+        //   true  — ignore the last-saved localization pose from the DB.
+        //           Needed for setInitialPose() (from initial_pose config) to
+        //           actually stick; otherwise rtabmap snaps the correction back
+        //           to the stored pose on the first frame.
+        //   false — restore the last-saved pose (rtabmap's default).
+        // Default: true when initial_pose is configured, false otherwise.
+        bool default_start_at_origin =
+            config.contains("initial_pose") && !config["initial_pose"].is_null();
+        bool start_at_origin = config.value("start_at_origin", default_start_at_origin);
+        params.insert({rtabmap::Parameters::kRGBDStartAtOrigin(),
+                       start_at_origin ? "true" : "false"});
     }
 
     odom_.reset(rtabmap::Odometry::create(params));
@@ -159,6 +172,14 @@ bool SlamPipeline::init(const json &config) {
 
     rtabmap_ = std::make_unique<rtabmap::Rtabmap>();
     rtabmap_->init(params, db_path_);
+    // Proof that DB contents are loaded into rtabmap's working memory:
+    // getWMSize() reads directly from rtabmap's Memory class. This number
+    // is what "match candidates" the SLAM layer has available right now.
+    // In localize_only mode this stays constant for the whole session
+    // (IncrementalMemory=false prevents growth).
+    std::cout << "[SLAM] Rtabmap working memory after init: "
+              << rtabmap_->getWMSize() << " nodes from "
+              << (db_path_.empty() ? "(none)" : db_path_) << "\n";
 
     // Initial pose guess for localization. When localizing in a pre-built map
     // rtabmap needs to know roughly where in the map we're starting, otherwise
@@ -299,6 +320,28 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
         if (max_range_ > 0 && r2 > max_r2) continue;
         xyzi_filtered->push_back(p);
     }
+
+    // Pre-transform filtered cloud into base_link frame so the viewer and
+    // rtabmap see the same geometry. If we left it in raw sensor frame and
+    // the viewer multiplied it by latest_pose (which is the base_link pose
+    // in the map frame), the live cloud would be shifted by lidar_to_base_
+    // relative to everything else (the local map, the loaded map, etc.).
+    if (!lidar_to_base_.isIdentity() && !lidar_to_base_.isNull()) {
+        auto transformed = pcl::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+        transformed->reserve(xyzi_filtered->size());
+        const float *t = lidar_to_base_.data();
+        for (const auto &p : *xyzi_filtered) {
+            pcl::PointXYZI tp = p;
+            tp.x = t[0]*p.x + t[1]*p.y + t[2]*p.z + t[3];
+            tp.y = t[4]*p.x + t[5]*p.y + t[6]*p.z + t[7];
+            tp.z = t[8]*p.x + t[9]*p.y + t[10]*p.z + t[11];
+            transformed->push_back(tp);
+        }
+        transformed->width = transformed->size();
+        transformed->height = 1;
+        xyzi_filtered = transformed;
+    }
+
     if (filtered_cloud) {
         *filtered_cloud = xyzi_filtered;
     }
@@ -375,30 +418,60 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
         rtabmap::Transform correction = rtabmap_->getMapCorrection();
         current_pose_ = correction.isNull() ? pose : (correction * pose);
 
-        // Localization state: correction is identity until rtabmap matches a
-        // loaded-map node. Once set it stays (even through intermittent odom
-        // failures), so this is a latch, not a per-frame presence signal.
-        bool locked_now = !correction.isNull() && !correction.isIdentity();
+        // In LiDAR-only localization, matches almost always come through the
+        // proximity detection pathway (geometric), not the visual loop-closure
+        // pathway. Read both so we don't miss the match.
         int loop_id = rtabmap_->getLoopClosureId();
-        if (locked_now && !localized_) {
-            std::cout << "[SLAM] *** LOCALIZED *** to map via node " << loop_id
-                      << " | correction: " << correction.prettyPrint() << "\n";
-            localized_ = true;
-        } else if (loop_id > 0) {
-            // Subsequent loop-closure hits refine the correction; worth logging.
-            std::cout << "[SLAM] Loop closure this frame: node " << loop_id
-                      << " (score " << std::fixed << std::setprecision(3)
-                      << rtabmap_->getLoopClosureValue() << ")\n";
+        int prox_id = rtabmap_->getStatistics().proximityDetectionId();
+        int match_id = loop_id > 0 ? loop_id : prox_id;
+        const char *match_kind = loop_id > 0 ? "loop" : "proximity";
+
+        if (match_id > 0) {
+            frames_since_match_ = 0;
+            if (!ever_localized_) {
+                std::cout << "[SLAM] *** FIRST LOCALIZATION *** via " << match_kind
+                          << " match to node " << match_id << "\n";
+                ever_localized_ = true;
+            } else {
+                std::cout << "[SLAM] " << match_kind << " match: node "
+                          << match_id;
+                if (loop_id > 0) std::cout << " (score " << std::fixed
+                                           << std::setprecision(3)
+                                           << rtabmap_->getLoopClosureValue() << ")";
+                std::cout << "\n";
+            }
+        } else if (frames_since_match_ >= 0) {
+            // Only tick once we've had at least one match; before that the
+            // counter stays at its "never matched" sentinel (-1).
+            frames_since_match_++;
+        }
+
+        // Cache matched node pose (from loaded_poses_) for viewer rendering.
+        // Lock order: slam_mutex_ (held) → grid_mutex_, matches loadMap.
+        if (match_id > 0) {
+            std::lock_guard<std::mutex> glock(grid_mutex_);
+            auto it = loaded_poses_.find(match_id);
+            if (it != loaded_poses_.end()) {
+                last_closure_id_ = match_id;
+                last_closure_pose_ = it->second;
+            }
         }
 
         if (frame_count_ % 10 == 0) {
+            bool live_locked = frames_since_match_ >= 0 && frames_since_match_ <= 3;
+            std::string match_str = frames_since_match_ < 0
+                ? std::string("never")
+                : std::to_string(frames_since_match_) + " frames ago";
             std::cout << "[SLAM] Frame " << frame_count_
-                      << " | " << (localized_ ? "LOCALIZED" : "SEARCHING")
-                      << " | pose: " << pose.prettyPrint()
+                      << " | wm=" << rtabmap_->getWMSize()
+                      << " | " << (live_locked ? "LOCALIZED" : "LOST")
+                      << " | last_match=" << match_str
+                      << " | odom: " << pose.prettyPrint()
+                      << " | correction: " << (correction.isNull() ? std::string("null")
+                                              : correction.isIdentity() ? std::string("identity")
+                                              : correction.prettyPrint())
                       << " | icp_ratio=" << std::fixed << std::setprecision(2)
-                      << odom_info.reg.icpInliersRatio
-                      << " corr=" << odom_info.reg.icpCorrespondences
-                      << " rms=" << std::setprecision(4) << odom_info.reg.icpRMS << "\n";
+                      << odom_info.reg.icpInliersRatio << "\n";
         }
     } // slam_mutex_ released
 
@@ -480,9 +553,52 @@ rtabmap::Transform SlamPipeline::getPose() const {
     return current_pose_;
 }
 
-bool SlamPipeline::isLocalized() const {
+bool SlamPipeline::isLocalized(int staleness_frames) const {
     std::lock_guard<std::mutex> lock(slam_mutex_);
-    return localized_;
+    // -1 sentinel means "never matched" — always not localized in that case.
+    return frames_since_match_ >= 0 && frames_since_match_ <= staleness_frames;
+}
+
+int SlamPipeline::framesSinceMatch() const {
+    std::lock_guard<std::mutex> lock(slam_mutex_);
+    return frames_since_match_;
+}
+
+std::pair<int, rtabmap::Transform> SlamPipeline::getLastLoopClosure() const {
+    std::lock_guard<std::mutex> lock(slam_mutex_);
+    return {last_closure_id_, last_closure_pose_};
+}
+
+pcl::PointCloud<pcl::PointXYZI>::Ptr SlamPipeline::getLocalMap() const {
+    auto out = pcl::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+    std::lock_guard<std::mutex> lock(slam_mutex_);
+    if (!odom_) return out;
+    auto *f2m = dynamic_cast<const rtabmap::OdometryF2M *>(odom_.get());
+    if (!f2m) return out; // only F2M maintains a rolling local map
+
+    const rtabmap::Signature &sig = f2m->getMap();
+    rtabmap::LaserScan scan = sig.sensorData().laserScanRaw();
+    if (scan.isEmpty()) return out;
+
+    // util3d gives us XYZ; copy into XYZI with intensity=128.
+    pcl::PointCloud<pcl::PointXYZ>::Ptr xyz =
+        rtabmap::util3d::laserScanToPointCloud(scan);
+    out->reserve(xyz->size());
+    for (const auto &p : *xyz) {
+        pcl::PointXYZI pi;
+        pi.x = p.x; pi.y = p.y; pi.z = p.z;
+        pi.intensity = 128.0f;
+        out->push_back(pi);
+    }
+    out->width = out->size();
+    out->height = 1;
+    return out;
+}
+
+rtabmap::Transform SlamPipeline::getMapCorrection() const {
+    std::lock_guard<std::mutex> lock(slam_mutex_);
+    if (!rtabmap_) return rtabmap::Transform::getIdentity();
+    return rtabmap_->getMapCorrection();
 }
 
 std::vector<std::pair<float,float>> SlamPipeline::getTrajectory() const {
@@ -577,6 +693,20 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr SlamPipeline::loadMap(int map_id) {
             std::cout << "[SLAM] Using raw odometry poses (no saved optimization found)\n";
         } else {
             std::cout << "[SLAM] Using optimized poses (" << poses.size() << " nodes)\n";
+        }
+
+        // Dump node ID range so matches can be confirmed against this set.
+        // Any subsequent "match to node N" log must have N in this range —
+        // new nodes can't appear because IncrementalMemory=false.
+        if (!poses.empty()) {
+            int min_id = poses.begin()->first;
+            int max_id = poses.begin()->first;
+            for (auto &[id, _] : poses) {
+                if (id < min_id) min_id = id;
+                if (id > max_id) max_id = id;
+            }
+            std::cout << "[SLAM] Loaded map node IDs: [" << min_id << ".." << max_id
+                      << "] (" << poses.size() << " total)\n";
         }
 
         // Re-apply configured initial pose now that the map is loaded. Calling

@@ -74,9 +74,28 @@ public:
     int getMapSize() const;
     int getFrameCount() const { return frame_count_; }
 
-    // True once rtabmap has produced a non-identity mapCorrection (i.e. it
-    // matched a loaded-map node). Latches — doesn't flip back on drift.
-    bool isLocalized() const;
+    // True if rtabmap got a proximity/loop match within the last
+    // `staleness_frames` frames. Flips back to false when matches stop
+    // happening, so it reflects live state, not history.
+    bool isLocalized(int staleness_frames = 3) const;
+
+    // Number of processCloud calls since the last successful match.
+    // 0 means "matched this frame". Grows unboundedly while lost.
+    int framesSinceMatch() const;
+
+    // The last map node we loop-closed to. Returns (-1, null transform) if
+    // no match has happened yet. The pose is the node's optimized pose in
+    // the map frame, suitable for rendering directly in the viewer.
+    std::pair<int, rtabmap::Transform> getLastLoopClosure() const;
+
+    // The F2M odometry's rolling local map — the reference cloud odometry
+    // ICPs each new scan against. Returned in odom frame. Empty if odometry
+    // isn't F2M (odom_strategy != 0) or hasn't accumulated scans yet.
+    pcl::PointCloud<pcl::PointXYZI>::Ptr getLocalMap() const;
+
+    // Odom→map transform applied by rtabmap during localization.
+    // Identity until localization locks on.
+    rtabmap::Transform getMapCorrection() const;
 
     // Reconstruct accumulated map from database and populate the occupancy grid cache.
     // map_id = -1 loads all sessions; otherwise only that session.
@@ -102,10 +121,18 @@ private:
     rtabmap::Transform initial_pose_; // null if not configured
     int frame_count_ = 0;
     std::string db_path_;
-    // Localization state against loaded map: true once mapCorrection has been
-    // set to a non-identity transform by rtabmap. Tracked so we can log
-    // transitions (SEARCHING → LOCALIZED → LOST) instead of silently drifting.
-    bool localized_ = false;
+    // Frames since rtabmap last produced a proximity/loop match. 0 means a
+    // match happened on the most recent processCloud call. -1 means "never
+    // matched in this session" — use ever_localized_ in callers to branch.
+    int frames_since_match_ = -1;
+    // Latched-at-first-match tracking just for the one-time "*** LOCALIZED ***"
+    // transition log. Set to true forever after the first match; the live
+    // indicator uses frames_since_match_ instead.
+    bool ever_localized_ = false;
+    // Last successful match node id and its pose in the map frame (from
+    // loaded_poses_). -1 / null until first match. Protected by slam_mutex_.
+    int last_closure_id_ = -1;
+    rtabmap::Transform last_closure_pose_;
 
     // Guards odom_, rtabmap_, current_pose_, frame_count_
     mutable std::mutex slam_mutex_;

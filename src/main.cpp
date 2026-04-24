@@ -44,6 +44,7 @@
 #include <pcl/point_types.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/kdtree/kdtree_flann.h>
+#include <pcl/console/print.h>
 
 #include <rtabmap/gui/CloudViewer.h>
 #include <rtabmap/core/Transform.h>
@@ -95,6 +96,11 @@ int main(int argc, char *argv[]) {
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
 
+    // Silence PCL's "Failed to find match for field 'intensity'" warnings
+    // that spam every frame when rtabmap's normal estimator converts our
+    // XYZI laser scan into XYZ for neighbor search. Errors still print.
+    pcl::console::setVerbosityLevel(pcl::console::L_ERROR);
+
     // VTK's QVTKOpenGLNativeWidget (used by rtabmap::CloudViewer) requires
     // the default surface format to be set before QApplication — otherwise
     // the OpenGL context lacks VAO support and the first paint dereferences
@@ -125,6 +131,7 @@ int main(int argc, char *argv[]) {
     int downsample_interval = config.value("map_downsample_interval", 50);
     std::string color_mode = config.value("color_mode", "intensity");
     bool show_trajectory = config.value("show_trajectory", true);
+    bool show_local_map = config.value("show_local_map", false);
     int map_add_interval = config.value("map_add_interval", 1);
     bool add_scans_to_map = config.value("add_scans_to_map", true);
 
@@ -810,6 +817,7 @@ int main(int argc, char *argv[]) {
             json new_config = json::parse(rf);
             map_add_interval = new_config.value("map_add_interval", map_add_interval);
             add_scans_to_map = new_config.value("add_scans_to_map", add_scans_to_map);
+            show_local_map = new_config.value("show_local_map", show_local_map);
             map_voxel = new_config.value("map_voxel_size", map_voxel);
             downsample_interval = new_config.value("map_downsample_interval", downsample_interval);
             color_mode = new_config.value("color_mode", color_mode);
@@ -1272,6 +1280,31 @@ int main(int argc, char *argv[]) {
         viewer.addCloud("scan", scan_rgb, latest_pose);
         viewer.setCloudPointSize("scan", scan_point_size);
 
+        // Draw F2M local map (odometry's rolling reference) — the cloud ICP
+        // actually matches each new scan against. Rendered in odom frame,
+        // then transformed to map frame via the current correction so it
+        // overlays correctly with the loaded map. Blue, small points.
+        if (show_local_map) {
+            auto local = slam.getLocalMap();
+            if (local && !local->empty()) {
+                auto local_rgb = pcl::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
+                local_rgb->reserve(local->size());
+                for (const auto &p : *local) {
+                    pcl::PointXYZRGB rp;
+                    rp.x = p.x; rp.y = p.y; rp.z = p.z;
+                    rp.r = 80; rp.g = 150; rp.b = 255; // blue
+                    local_rgb->push_back(rp);
+                }
+                local_rgb->width = local_rgb->size(); local_rgb->height = 1;
+                viewer.addCloud("local_map", local_rgb, slam.getMapCorrection());
+                viewer.setCloudPointSize("local_map", 1);
+            } else {
+                viewer.removeCloud("local_map");
+            }
+        } else {
+            viewer.removeCloud("local_map");
+        }
+
         // Draw trajectory
         if (show_trajectory && trajectory_xz.size() > 1) {
             viewer.removeCloud("trajectory");
@@ -1307,11 +1340,28 @@ int main(int argc, char *argv[]) {
             .arg(map_points.size())
             .arg(QString::fromStdString(color_mode)));
 
-        // Update localization state overlay
-        bool loc = slam.isLocalized();
-        status_text->SetInput(loc ? "LOCALIZED" : "SEARCHING");
+        // Update localization state overlay — flips back to LOST when matches
+        // stop happening (live state, not a latch).
+        int fsm = slam.framesSinceMatch();
+        bool loc = fsm >= 0 && fsm <= 3;
+        QString label;
+        if (fsm < 0)       label = "SEARCHING";
+        else if (loc)      label = QString("LOCALIZED  (%1f ago)").arg(fsm);
+        else               label = QString("LOST  (%1f ago)").arg(fsm);
+        status_text->SetInput(label.toStdString().c_str());
         if (loc) status_text->GetTextProperty()->SetColor(0.2, 1.0, 0.2);
         else     status_text->GetTextProperty()->SetColor(1.0, 0.2, 0.2);
+
+        // Highlight the last matched map node as a yellow sphere and draw a
+        // line from our current pose to it, so you can see which node is
+        // anchoring localization.
+        auto [closure_id, closure_pose] = slam.getLastLoopClosure();
+        if (closure_id > 0 && !closure_pose.isNull()) {
+            viewer.addOrUpdateSphere("closure_node", closure_pose, 0.3f,
+                                     QColor(255, 255, 0), /*foreground*/true);
+            viewer.addOrUpdateLine("closure_link", latest_pose, closure_pose,
+                                   QColor(255, 255, 0), /*arrow*/false, /*foreground*/true);
+        }
 
         viewer.refreshView();
     });

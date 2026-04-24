@@ -13,6 +13,7 @@
   "use_imu_prior": false,
   "load_map": "largest",
   "localize_only": true,
+  "start_at_origin": true,
   "initial_pose": {
     "x": 0.0, "y": 0.0, "z": 0.0,
     "roll": 0.0, "pitch": 0.0, "yaw": -1.5708
@@ -29,7 +30,7 @@
   "map_add_interval": 1,
   "add_scans_to_map": false,
   "map_voxel_size": 0.07,
-  "map_downsample_interval": 2,
+  "map_downsample_interval": 5,
   "grid_resolution": 0.05,
   "grid_min_height": -0.7,
   "grid_max_height": 1.4,
@@ -43,6 +44,7 @@
   "scan_point_size": 2,
   "camera_distance": 15.0,
   "show_trajectory": true,
+  "show_local_map": true,
   "icp": {
     "odom_strategy": 0,
     "filtering_strategy": 1,
@@ -55,9 +57,9 @@
     "point_to_plane_ground_normals_up": 0.8,
     "point_to_plane_min_complexity": 0.02,
     "voxel_size": 0.03,
-    "max_correspondence_distance": 0.3,
+    "max_correspondence_distance": 0.4,
     "correspondence_ratio": 0.35,
-    "reciprocal_correspondences": true,
+    "reciprocal_correspondences": false,
     "iterations": 40,
     "epsilon": 0.0005,
     "max_translation": 0.8,
