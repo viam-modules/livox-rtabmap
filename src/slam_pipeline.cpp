@@ -300,8 +300,25 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
         rtabmap::Transform correction = rtabmap_->getMapCorrection();
         current_pose_ = correction.isNull() ? pose : (correction * pose);
 
+        // Localization state: correction is identity until rtabmap matches a
+        // loaded-map node. Once set it stays (even through intermittent odom
+        // failures), so this is a latch, not a per-frame presence signal.
+        bool locked_now = !correction.isNull() && !correction.isIdentity();
+        int loop_id = rtabmap_->getLoopClosureId();
+        if (locked_now && !localized_) {
+            std::cout << "[SLAM] *** LOCALIZED *** to map via node " << loop_id
+                      << " | correction: " << correction.prettyPrint() << "\n";
+            localized_ = true;
+        } else if (loop_id > 0) {
+            // Subsequent loop-closure hits refine the correction; worth logging.
+            std::cout << "[SLAM] Loop closure this frame: node " << loop_id
+                      << " (score " << std::fixed << std::setprecision(3)
+                      << rtabmap_->getLoopClosureValue() << ")\n";
+        }
+
         if (frame_count_ % 10 == 0) {
             std::cout << "[SLAM] Frame " << frame_count_
+                      << " | " << (localized_ ? "LOCALIZED" : "SEARCHING")
                       << " | pose: " << pose.prettyPrint()
                       << " | icp_ratio=" << std::fixed << std::setprecision(2)
                       << odom_info.reg.icpInliersRatio

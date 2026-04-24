@@ -80,6 +80,10 @@ private:
     rtabmap::Transform initial_pose_; // null if not configured
     int frame_count_ = 0;
     std::string db_path_;
+    // Localization state against loaded map: true once mapCorrection has been
+    // set to a non-identity transform by rtabmap. Tracked so we can log
+    // transitions (SEARCHING → LOCALIZED → LOST) instead of silently drifting.
+    bool localized_ = false;
 
     // Guards odom_, rtabmap_, current_pose_, frame_count_
     mutable std::mutex slam_mutex_;
