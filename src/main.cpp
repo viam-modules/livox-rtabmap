@@ -44,6 +44,7 @@
 #include <pcl/point_types.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/kdtree/kdtree_flann.h>
+#include <pcl/console/print.h>
 
 #include <rtabmap/gui/CloudViewer.h>
 #include <rtabmap/core/Transform.h>
@@ -94,6 +95,11 @@ struct MapPoint {
 int main(int argc, char *argv[]) {
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
+
+    // Silence PCL's "Failed to find match for field 'intensity'" warnings
+    // that spam every frame when rtabmap's normal estimator converts our
+    // XYZI laser scan into XYZ for neighbor search. Errors still print.
+    pcl::console::setVerbosityLevel(pcl::console::L_ERROR);
 
     // VTK's QVTKOpenGLNativeWidget (used by rtabmap::CloudViewer) requires
     // the default surface format to be set before QApplication — otherwise
@@ -1210,9 +1216,13 @@ int main(int argc, char *argv[]) {
             .arg(map_points.size())
             .arg(QString::fromStdString(color_mode)));
 
-        // Update localization state overlay
-        bool loc = slam.isLocalized();
-        status_text->SetInput(loc ? "LOCALIZED" : "SEARCHING");
+        // Update localization state overlay — flips back to LOST when matches
+        // stop happening (live state, not a latch).
+        int fsm = slam.framesSinceMatch();
+        bool loc = fsm <= 3;
+        QString label = loc ? QString("LOCALIZED  (%1f ago)").arg(fsm)
+                            : QString("LOST  (%1f ago)").arg(fsm);
+        status_text->SetInput(label.toStdString().c_str());
         if (loc) status_text->GetTextProperty()->SetColor(0.2, 1.0, 0.2);
         else     status_text->GetTextProperty()->SetColor(1.0, 0.2, 0.2);
 

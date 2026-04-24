@@ -345,10 +345,6 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
         rtabmap::Transform correction = rtabmap_->getMapCorrection();
         current_pose_ = correction.isNull() ? pose : (correction * pose);
 
-        // Localization state: correction is identity until rtabmap matches a
-        // loaded-map node. Once set it stays (even through intermittent odom
-        // failures), so this is a latch, not a per-frame presence signal.
-        bool locked_now = !correction.isNull() && !correction.isIdentity();
         // In LiDAR-only localization, matches almost always come through the
         // proximity detection pathway (geometric), not the visual loop-closure
         // pathway. Read both so we don't miss the match.
@@ -357,18 +353,22 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
         int match_id = loop_id > 0 ? loop_id : prox_id;
         const char *match_kind = loop_id > 0 ? "loop" : "proximity";
 
-        if (locked_now && !localized_) {
-            std::cout << "[SLAM] *** LOCALIZED *** via " << match_kind
-                      << " match to node " << match_id
-                      << " | correction: " << correction.prettyPrint() << "\n";
-            localized_ = true;
-        } else if (match_id > 0) {
-            std::cout << "[SLAM] " << match_kind << " match this frame: node "
-                      << match_id;
-            if (loop_id > 0) std::cout << " (score " << std::fixed
-                                       << std::setprecision(3)
-                                       << rtabmap_->getLoopClosureValue() << ")";
-            std::cout << "\n";
+        if (match_id > 0) {
+            frames_since_match_ = 0;
+            if (!ever_localized_) {
+                std::cout << "[SLAM] *** FIRST LOCALIZATION *** via " << match_kind
+                          << " match to node " << match_id << "\n";
+                ever_localized_ = true;
+            } else {
+                std::cout << "[SLAM] " << match_kind << " match: node "
+                          << match_id;
+                if (loop_id > 0) std::cout << " (score " << std::fixed
+                                           << std::setprecision(3)
+                                           << rtabmap_->getLoopClosureValue() << ")";
+                std::cout << "\n";
+            }
+        } else {
+            frames_since_match_++;
         }
 
         // Cache matched node pose (from loaded_poses_) for viewer rendering.
@@ -383,16 +383,18 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
         }
 
         if (frame_count_ % 10 == 0) {
+            // Live indicator: "localized" means match within last 3 frames.
+            bool live_locked = frames_since_match_ <= 3;
             std::cout << "[SLAM] Frame " << frame_count_
                       << " | wm=" << rtabmap_->getWMSize()
-                      << " | " << (localized_ ? "LOCALIZED" : "SEARCHING")
+                      << " | " << (live_locked ? "LOCALIZED" : "LOST")
+                      << " | last_match=" << frames_since_match_ << " frames ago"
                       << " | odom: " << pose.prettyPrint()
                       << " | correction: " << (correction.isNull() ? std::string("null")
                                               : correction.isIdentity() ? std::string("identity")
                                               : correction.prettyPrint())
                       << " | icp_ratio=" << std::fixed << std::setprecision(2)
-                      << odom_info.reg.icpInliersRatio
-                      << " corr=" << odom_info.reg.icpCorrespondences << "\n";
+                      << odom_info.reg.icpInliersRatio << "\n";
         }
     } // slam_mutex_ released
 
@@ -463,9 +465,14 @@ rtabmap::Transform SlamPipeline::getPose() const {
     return current_pose_;
 }
 
-bool SlamPipeline::isLocalized() const {
+bool SlamPipeline::isLocalized(int staleness_frames) const {
     std::lock_guard<std::mutex> lock(slam_mutex_);
-    return localized_;
+    return frames_since_match_ <= staleness_frames;
+}
+
+int SlamPipeline::framesSinceMatch() const {
+    std::lock_guard<std::mutex> lock(slam_mutex_);
+    return frames_since_match_;
 }
 
 std::pair<int, rtabmap::Transform> SlamPipeline::getLastLoopClosure() const {

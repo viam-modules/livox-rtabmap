@@ -56,9 +56,14 @@ public:
     int getMapSize() const;
     int getFrameCount() const { return frame_count_; }
 
-    // True once rtabmap has produced a non-identity mapCorrection (i.e. it
-    // matched a loaded-map node). Latches — doesn't flip back on drift.
-    bool isLocalized() const;
+    // True if rtabmap got a proximity/loop match within the last
+    // `staleness_frames` frames. Flips back to false when matches stop
+    // happening, so it reflects live state, not history.
+    bool isLocalized(int staleness_frames = 3) const;
+
+    // Number of processCloud calls since the last successful match.
+    // 0 means "matched this frame". Grows unboundedly while lost.
+    int framesSinceMatch() const;
 
     // The last map node we loop-closed to. Returns (-1, null transform) if
     // no match has happened yet. The pose is the node's optimized pose in
@@ -98,13 +103,16 @@ private:
     rtabmap::Transform initial_pose_; // null if not configured
     int frame_count_ = 0;
     std::string db_path_;
-    // Localization state against loaded map: true once mapCorrection has been
-    // set to a non-identity transform by rtabmap. Tracked so we can log
-    // transitions (SEARCHING → LOCALIZED → LOST) instead of silently drifting.
-    bool localized_ = false;
-    // Latched last successful loop closure: node id in the loaded DB and its
-    // pose in the map frame (looked up from loaded_poses_). -1 / null until
-    // first match. Protected by slam_mutex_.
+    // Frames since rtabmap last produced a proximity/loop match. 0 means a
+    // match happened on the most recent processCloud call. Grows unboundedly
+    // while we're lost. "localized" for display purposes = 0..N frames old.
+    int frames_since_match_ = 1000000;
+    // Latched-at-first-match tracking just for the one-time "*** LOCALIZED ***"
+    // transition log. Set to true forever after the first match; the live
+    // indicator uses frames_since_match_ instead.
+    bool ever_localized_ = false;
+    // Last successful match node id and its pose in the map frame (from
+    // loaded_poses_). -1 / null until first match. Protected by slam_mutex_.
     int last_closure_id_ = -1;
     rtabmap::Transform last_closure_pose_;
 
