@@ -267,12 +267,36 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
         if (max_range_ > 0 && r2 > max_r2) continue;
         xyzi_filtered->push_back(p);
     }
+
+    // Pre-transform filtered cloud into base_link frame so the viewer and
+    // rtabmap see the same geometry. If we left it in raw sensor frame and
+    // the viewer multiplied it by latest_pose (which is the base_link pose
+    // in the map frame), the live cloud would be shifted by lidar_to_base_
+    // relative to everything else (the local map, the loaded map, etc.).
+    if (!lidar_to_base_.isIdentity() && !lidar_to_base_.isNull()) {
+        auto transformed = pcl::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+        transformed->reserve(xyzi_filtered->size());
+        const float *t = lidar_to_base_.data();
+        for (const auto &p : *xyzi_filtered) {
+            pcl::PointXYZI tp = p;
+            tp.x = t[0]*p.x + t[1]*p.y + t[2]*p.z + t[3];
+            tp.y = t[4]*p.x + t[5]*p.y + t[6]*p.z + t[7];
+            tp.z = t[8]*p.x + t[9]*p.y + t[10]*p.z + t[11];
+            transformed->push_back(tp);
+        }
+        transformed->width = transformed->size();
+        transformed->height = 1;
+        xyzi_filtered = transformed;
+    }
+
     if (filtered_cloud) {
         *filtered_cloud = xyzi_filtered;
     }
 
     double stamp = static_cast<double>(timestamp_ns) / 1e9;
-    rtabmap::LaserScan scan = rtabmap::util3d::laserScanFromPointCloud(*xyzi_filtered, lidar_to_base_);
+    // xyzi_filtered is already in base_link frame, so pass identity here
+    // (do NOT double-apply lidar_to_base_).
+    rtabmap::LaserScan scan = rtabmap::util3d::laserScanFromPointCloud(*xyzi_filtered);
     rtabmap::SensorData data(scan, cv::Mat(), cv::Mat(), rtabmap::CameraModel(), 0, stamp);
 
     rtabmap::Transform pose;
