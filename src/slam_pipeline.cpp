@@ -171,6 +171,14 @@ bool SlamPipeline::init(const json &config) {
 
     rtabmap_ = std::make_unique<rtabmap::Rtabmap>();
     rtabmap_->init(params, db_path_);
+    // Proof that DB contents are loaded into rtabmap's working memory:
+    // getWMSize() reads directly from rtabmap's Memory class. This number
+    // is what "match candidates" the SLAM layer has available right now.
+    // In localize_only mode this stays constant for the whole session
+    // (IncrementalMemory=false prevents growth).
+    std::cout << "[SLAM] Rtabmap working memory after init: "
+              << rtabmap_->getWMSize() << " nodes from "
+              << (db_path_.empty() ? "(none)" : db_path_) << "\n";
 
     // Initial pose guess for localization. When localizing in a pre-built map
     // rtabmap needs to know roughly where in the map we're starting, otherwise
@@ -376,12 +384,12 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
 
         if (frame_count_ % 10 == 0) {
             std::cout << "[SLAM] Frame " << frame_count_
+                      << " | wm=" << rtabmap_->getWMSize()
                       << " | " << (localized_ ? "LOCALIZED" : "SEARCHING")
                       << " | odom: " << pose.prettyPrint()
                       << " | correction: " << (correction.isNull() ? std::string("null")
                                               : correction.isIdentity() ? std::string("identity")
                                               : correction.prettyPrint())
-                      << " | map_pose: " << current_pose_.prettyPrint()
                       << " | icp_ratio=" << std::fixed << std::setprecision(2)
                       << odom_info.reg.icpInliersRatio
                       << " corr=" << odom_info.reg.icpCorrespondences << "\n";
