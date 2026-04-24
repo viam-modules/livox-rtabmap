@@ -181,8 +181,13 @@ bool SlamPipeline::init(const json &config) {
                                       m[8], m[9], m[10], m[11]);
         }
         if (!init.isNull()) {
-            rtabmap_->setInitialPose(init);
+            // Seed odometry immediately so frame 0 starts at this pose.
             odom_->reset(init);
+            // Stash for loadMap() to re-apply after the database is loaded —
+            // calling setInitialPose before the map is loaded has no effect.
+            initial_pose_ = init;
+            // Also apply here in case loadMap is never called (pure mapping mode).
+            rtabmap_->setInitialPose(init);
             std::cout << "[SLAM] Initial pose set: " << init.prettyPrint() << "\n";
         }
     }
@@ -453,6 +458,15 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr SlamPipeline::loadMap(int map_id) {
             std::cout << "[SLAM] Using raw odometry poses (no saved optimization found)\n";
         } else {
             std::cout << "[SLAM] Using optimized poses (" << poses.size() << " nodes)\n";
+        }
+
+        // Re-apply configured initial pose now that the map is loaded. Calling
+        // setInitialPose before loadMap has no effect — rtabmap needs the
+        // graph present to seed the localization search near the given pose.
+        if (!initial_pose_.isNull()) {
+            rtabmap_->setInitialPose(initial_pose_);
+            std::cout << "[SLAM] Re-applied initial pose to loaded map: "
+                      << initial_pose_.prettyPrint() << "\n";
         }
     } // slam_mutex_ released
 

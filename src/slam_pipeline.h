@@ -77,6 +77,7 @@ private:
     std::unique_ptr<rtabmap::Odometry> odom_;
     std::unique_ptr<rtabmap::Rtabmap> rtabmap_;
     rtabmap::Transform current_pose_;
+    rtabmap::Transform initial_pose_; // null if not configured
     int frame_count_ = 0;
     std::string db_path_;
 
