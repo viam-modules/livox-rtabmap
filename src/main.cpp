@@ -1219,9 +1219,11 @@ int main(int argc, char *argv[]) {
         // Update localization state overlay — flips back to LOST when matches
         // stop happening (live state, not a latch).
         int fsm = slam.framesSinceMatch();
-        bool loc = fsm <= 3;
-        QString label = loc ? QString("LOCALIZED  (%1f ago)").arg(fsm)
-                            : QString("LOST  (%1f ago)").arg(fsm);
+        bool loc = fsm >= 0 && fsm <= 3;
+        QString label;
+        if (fsm < 0)       label = "SEARCHING";
+        else if (loc)      label = QString("LOCALIZED  (%1f ago)").arg(fsm);
+        else               label = QString("LOST  (%1f ago)").arg(fsm);
         status_text->SetInput(label.toStdString().c_str());
         if (loc) status_text->GetTextProperty()->SetColor(0.2, 1.0, 0.2);
         else     status_text->GetTextProperty()->SetColor(1.0, 0.2, 0.2);

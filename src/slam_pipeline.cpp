@@ -367,7 +367,9 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
                                            << rtabmap_->getLoopClosureValue() << ")";
                 std::cout << "\n";
             }
-        } else {
+        } else if (frames_since_match_ >= 0) {
+            // Only tick once we've had at least one match; before that the
+            // counter stays at its "never matched" sentinel (-1).
             frames_since_match_++;
         }
 
@@ -383,12 +385,14 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
         }
 
         if (frame_count_ % 10 == 0) {
-            // Live indicator: "localized" means match within last 3 frames.
-            bool live_locked = frames_since_match_ <= 3;
+            bool live_locked = frames_since_match_ >= 0 && frames_since_match_ <= 3;
+            std::string match_str = frames_since_match_ < 0
+                ? std::string("never")
+                : std::to_string(frames_since_match_) + " frames ago";
             std::cout << "[SLAM] Frame " << frame_count_
                       << " | wm=" << rtabmap_->getWMSize()
                       << " | " << (live_locked ? "LOCALIZED" : "LOST")
-                      << " | last_match=" << frames_since_match_ << " frames ago"
+                      << " | last_match=" << match_str
                       << " | odom: " << pose.prettyPrint()
                       << " | correction: " << (correction.isNull() ? std::string("null")
                                               : correction.isIdentity() ? std::string("identity")
@@ -467,7 +471,8 @@ rtabmap::Transform SlamPipeline::getPose() const {
 
 bool SlamPipeline::isLocalized(int staleness_frames) const {
     std::lock_guard<std::mutex> lock(slam_mutex_);
-    return frames_since_match_ <= staleness_frames;
+    // -1 sentinel means "never matched" — always not localized in that case.
+    return frames_since_match_ >= 0 && frames_since_match_ <= staleness_frames;
 }
 
 int SlamPipeline::framesSinceMatch() const {

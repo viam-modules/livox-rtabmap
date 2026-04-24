@@ -104,9 +104,9 @@ private:
     int frame_count_ = 0;
     std::string db_path_;
     // Frames since rtabmap last produced a proximity/loop match. 0 means a
-    // match happened on the most recent processCloud call. Grows unboundedly
-    // while we're lost. "localized" for display purposes = 0..N frames old.
-    int frames_since_match_ = 1000000;
+    // match happened on the most recent processCloud call. -1 means "never
+    // matched in this session" — use ever_localized_ in callers to branch.
+    int frames_since_match_ = -1;
     // Latched-at-first-match tracking just for the one-time "*** LOCALIZED ***"
     // transition log. Set to true forever after the first match; the live
     // indicator uses frames_since_match_ instead.
