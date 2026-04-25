@@ -98,6 +98,10 @@ void ViamClient::stop() {
 
 void ViamClient::cloudLoop() {
     const auto interval = std::chrono::microseconds(1'000'000 / cfg_.cloud_hz);
+    // Cooldown between reconnect attempts — prevents rapid reconnect storms that
+    // crash the Viam SDK's RobotClient destructor (actuator-stop spam over WiFi).
+    auto last_reconnect = std::chrono::steady_clock::time_point{};
+    constexpr int kReconnectCooldownSec = 5;
 
     while (running_) {
         auto t0 = std::chrono::steady_clock::now();
@@ -106,11 +110,22 @@ void ViamClient::cloudLoop() {
         {
             std::lock_guard<std::mutex> lock(machine_mu_);
             cam = camera_;
-            if (!cam && !reconnect()) {
-                std::this_thread::sleep_until(t0 + interval);
-                continue;
+            if (!cam) {
+                auto since = std::chrono::duration_cast<std::chrono::seconds>(
+                    t0 - last_reconnect).count();
+                if (since < kReconnectCooldownSec) {
+                    std::cerr << "[VIAM] reconnect cooldown (" << since << "s < "
+                              << kReconnectCooldownSec << "s), waiting\n";
+                    std::this_thread::sleep_until(t0 + interval);
+                    continue;
+                }
+                if (!reconnect()) {
+                    std::this_thread::sleep_until(t0 + interval);
+                    continue;
+                }
+                last_reconnect = std::chrono::steady_clock::now();
+                cam = camera_;
             }
-            cam = camera_;
         }
 
         try {
@@ -125,7 +140,12 @@ void ViamClient::cloudLoop() {
             auto cloud = parsePCD(result.pc);
             auto t_cb = std::chrono::steady_clock::now();
 
-            if (cloud && !cloud->empty()) frame_cb_(cloud, ts_ns);
+            // Skip clouds that are too small to produce valid ICP correspondences.
+            // A fresh connection or a corrupted PCD can return a handful of points
+            // which causes ICP to fail, resetting the odometry and spiralling.
+            constexpr size_t kMinPoints = 1000;
+            if (cloud && cloud->size() >= kMinPoints) frame_cb_(cloud, ts_ns);
+            auto t_done = std::chrono::steady_clock::now();
 
             auto ms = [](auto a, auto b) {
                 return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
@@ -136,7 +156,17 @@ void ViamClient::cloudLoop() {
                       << "ms  total=" << ms(t_fetch, t_done) << "ms"
                       << "  pts=" << (cloud ? cloud->size() : 0) << "\n";
         } catch (const std::exception &e) {
-            reconnect();
+            std::cerr << "[VIAM] cloud fetch error: " << e.what() << "\n";
+            auto since = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - last_reconnect).count();
+            if (since >= kReconnectCooldownSec) {
+                std::lock_guard<std::mutex> lock(machine_mu_);
+                camera_.reset();  // cleared; top of loop will reconnect after cooldown check
+                last_reconnect = std::chrono::steady_clock::now();
+            } else {
+                std::cerr << "[VIAM] reconnect cooldown (" << since << "s < "
+                          << kReconnectCooldownSec << "s), skipping reconnect\n";
+            }
         }
 
         std::this_thread::sleep_until(t0 + interval);
@@ -155,11 +185,11 @@ void ViamClient::imuLoop() {
         {
             std::lock_guard<std::mutex> lock(machine_mu_);
             sens = sensor_;
-            if (!sens && !reconnect()) {
-                std::this_thread::sleep_until(t0 + interval);
-                continue;
-            }
-            sens = sensor_;
+        }
+        if (!sens) {
+            // cloudLoop owns reconnects — wait for it to restore sensor_
+            std::this_thread::sleep_until(t0 + interval);
+            continue;
         }
 
         try {
@@ -181,10 +211,9 @@ void ViamClient::imuLoop() {
             imu.timestamp_ns = ts_ns;
             imu_cb_(imu);
         } catch (const std::exception &e) {
-            std::cerr << "[VIAM] IMU read: " << e.what() << " — reconnecting\n";
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            std::cerr << "[VIAM] IMU read error: " << e.what() << " — clearing handle, cloudLoop will reconnect\n";
             std::lock_guard<std::mutex> lock(machine_mu_);
-            reconnect();
+            sensor_.reset();
         }
 
         std::this_thread::sleep_until(t0 + interval);
@@ -266,7 +295,7 @@ void ViamClient::queryFrameSystem() {
     if (cfg_.planning_frame.empty() || !machine_) return;
 
     try {
-        auto pif = machine_->get_pose(cfg_.lidar_name, cfg_.planning_frame, {});
+        auto pif = machine_->get_pose(cfg_.lidar_name, cfg_.planning_frame, {}, {});
         lidar_in_planning_frame_ = poseToTransform(pif.pose);
         std::cout << "[VIAM] Lidar in planning frame '" << cfg_.planning_frame << "': "
                   << lidar_in_planning_frame_.prettyPrint() << "\n";
@@ -277,7 +306,7 @@ void ViamClient::queryFrameSystem() {
 
     if (!cfg_.rgb_name.empty()) {
         try {
-            auto pif = machine_->get_pose(cfg_.rgb_name, cfg_.lidar_name, {});
+            auto pif = machine_->get_pose(cfg_.rgb_name, cfg_.lidar_name, {}, {});
             camera_to_lidar_ = poseToTransform(pif.pose);
             std::cout << "[VIAM] Camera '" << cfg_.rgb_name << "' in lidar frame: "
                       << camera_to_lidar_.prettyPrint() << "\n";
@@ -289,7 +318,7 @@ void ViamClient::queryFrameSystem() {
 
     if (!cfg_.imu_name.empty()) {
         try {
-            auto pif = machine_->get_pose(cfg_.imu_name, cfg_.lidar_name, {});
+            auto pif = machine_->get_pose(cfg_.imu_name, cfg_.lidar_name, {}, {});
             imu_to_lidar_ = poseToTransform(pif.pose);
             std::cout << "[VIAM] IMU '" << cfg_.imu_name << "' in lidar frame: "
                       << imu_to_lidar_.prettyPrint() << "\n";
@@ -314,11 +343,11 @@ void ViamClient::rgbdLoop() {
         {
             std::lock_guard<std::mutex> lock(machine_mu_);
             cam = rgb_cam_;
-            if (!cam && !reconnect()) {
-                std::this_thread::sleep_until(t0 + interval);
-                continue;
-            }
-            cam = rgb_cam_;
+        }
+        if (!cam) {
+            // cloudLoop owns reconnects — wait for it to restore rgb_cam_
+            std::this_thread::sleep_until(t0 + interval);
+            continue;
         }
 
         if (!have_intrinsics) {
@@ -382,10 +411,12 @@ void ViamClient::rgbdLoop() {
                 rgbd_cb_(frame);
             }
         } catch (const std::exception &e) {
-            std::cerr << "[VIAM] RGBD read: " << e.what() << " — reconnecting\n";
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            std::lock_guard<std::mutex> lock(machine_mu_);
-            reconnect();
+            std::cerr << "[RGBD] read error: " << e.what() << " — clearing handle, cloudLoop will reconnect\n";
+            {
+                std::lock_guard<std::mutex> lock(machine_mu_);
+                rgb_cam_.reset();
+            }
+            have_intrinsics = false;  // re-fetch intrinsics on next good connection
         }
 
         std::this_thread::sleep_until(t0 + interval);

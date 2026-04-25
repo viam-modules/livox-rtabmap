@@ -249,24 +249,47 @@ bool SlamPipeline::init(const json &config) {
 void SlamPipeline::setCameraToLidar(const rtabmap::Transform &t) {
     std::lock_guard<std::mutex> lock(rgbd_mutex_);
     cam_to_lidar_ = t;
-    // Invalidate cached model so it gets rebuilt with the new extrinsic on next setLatestRGBD
     has_rgbd_ = false;
-    std::cout << "[SLAM] Camera-to-lidar extrinsic: " << t.prettyPrint() << "\n";
+    float roll, pitch, yaw;
+    t.getEulerAngles(roll, pitch, yaw);
+    std::cout << "[SLAM] Camera-to-lidar extrinsic: " << t.prettyPrint() << "\n"
+              << "[SLAM] Copy for playback config:\n"
+              << "  \"camera_to_lidar\": {\n"
+              << "    \"x\": "    << t.x() << ", \"y\": " << t.y() << ", \"z\": " << t.z() << ",\n"
+              << "    \"roll\": " << roll   << ", \"pitch\": " << pitch << ", \"yaw\": " << yaw << "\n"
+              << "  }\n";
 }
 
-void SlamPipeline::setInitialPose(const rtabmap::Transform &t) {
+void SlamPipeline::setLidarToBase(const rtabmap::Transform &t) {
     std::lock_guard<std::mutex> lock(slam_mutex_);
     if (t.isNull()) return;
-    initial_pose_ = t;
-    odom_->reset(t);
-    rtabmap_->setInitialPose(t);
-    std::cout << "[SLAM] Initial pose set from planning frame: " << t.prettyPrint() << "\n";
+    lidar_to_base_ = t;
+    float roll, pitch, yaw;
+    t.getEulerAngles(roll, pitch, yaw);
+    std::cout << "[SLAM] Lidar-to-base extrinsic from frame system: " << t.prettyPrint() << "\n"
+              << "[SLAM] Copy for playback config:\n"
+              << "  \"extrinsics\": {\n"
+              << "    \"x\": "    << t.x() << ", \"y\": " << t.y() << ", \"z\": " << t.z() << ",\n"
+              << "    \"roll\": " << roll   << ", \"pitch\": " << pitch << ", \"yaw\": " << yaw << "\n"
+              << "  }\n";
 }
 
 void SlamPipeline::setImuToLidar(const rtabmap::Transform &t) {
     std::lock_guard<std::mutex> lock(slam_mutex_);
     imu_to_lidar_ = t;
-    std::cout << "[SLAM] IMU-to-lidar extrinsic: " << t.prettyPrint() << "\n";
+    float roll, pitch, yaw;
+    t.getEulerAngles(roll, pitch, yaw);
+    std::cout << "[SLAM] IMU-to-lidar extrinsic: " << t.prettyPrint() << "\n"
+              << "[SLAM] Copy for playback config:\n"
+              << "  \"imu_to_lidar\": {\n"
+              << "    \"x\": "    << t.x() << ", \"y\": " << t.y() << ", \"z\": " << t.z() << ",\n"
+              << "    \"roll\": " << roll   << ", \"pitch\": " << pitch << ", \"yaw\": " << yaw << "\n"
+              << "  }\n";
+}
+
+cv::Mat SlamPipeline::getLatestRGB() const {
+    std::lock_guard<std::mutex> lock(rgbd_mutex_);
+    return latest_rgb_.empty() ? cv::Mat() : latest_rgb_.clone();
 }
 
 void SlamPipeline::setLatestRGBD(const cv::Mat &rgb, const cv::Mat &depth,

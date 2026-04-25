@@ -97,11 +97,13 @@ target_link_libraries(livox_rtabmap PRIVATE
 )
 
 if(WITH_VIAM)
-    find_package(OpenCV REQUIRED COMPONENTS core imgcodecs)
+    find_package(OpenCV REQUIRED COMPONENTS core imgcodecs imgproc features2d)
     target_link_libraries(livox_rtabmap PRIVATE
         viam-cpp-sdk::viamsdk
         viam-cpp-sdk::viamapi  # gRPC proxy
         opencv_imgcodecs
+        opencv_imgproc
+        opencv_features2d
     )
     target_compile_definitions(livox_rtabmap PRIVATE HAVE_VIAM_SDK)
 endif()

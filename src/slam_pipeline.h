@@ -44,13 +44,16 @@ public:
                        double fx, double fy, double cx, double cy,
                        int width, int height);
 
+    // Snapshot of the latest RGB frame for display. Empty if no RGBD data yet.
+    cv::Mat getLatestRGB() const;
+
     // Set the camera-to-lidar extrinsic transform (from Viam frame system).
     // Must be called before the first setLatestRGBD() for it to take effect.
     void setCameraToLidar(const rtabmap::Transform &t);
 
-    // Set the initial SLAM pose from the Viam planning frame.
-    // Overrides any initial_pose in the config. Call after init().
-    void setInitialPose(const rtabmap::Transform &t);
+    // Override the lidar→base extrinsic from the Viam frame system.
+    // Supersedes the "extrinsics" config block when planning_frame is set.
+    void setLidarToBase(const rtabmap::Transform &t);
 
     // Set the IMU-to-lidar extrinsic transform (from Viam frame system).
     void setImuToLidar(const rtabmap::Transform &t);

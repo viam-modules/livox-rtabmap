@@ -2,11 +2,14 @@
   "data_source": "viam",
   "viam": {
     "address":    "mugger-main.q0s2f7mco8.viam.cloud",
-    "lidar_name": "livox-pc",
-    "imu_name":   "livox-imu",
-    "base_name":  "cartbase",
-    "cloud_hz":   10,
-    "imu_hz":     10
+    "lidar_name":     "livox-pc",
+    "imu_name":       "",
+    "base_name":      "cartbase",
+    "rgb_name":       "",
+    "planning_frame": "",
+    "cloud_hz":       10,
+    "imu_hz":         100,
+    "rgb_hz":         15
   },
   "headless": false,
   "database_path": "MAP.db",
@@ -17,10 +20,6 @@
   "initial_pose": {
     "x": 0.0, "y": 0.0, "z": 0.0,
     "roll": 0.0, "pitch": 0.0, "yaw": -1.5708
-  },
-  "extrinsics": {
-    "x": 0.0, "y": 0.0, "z": 0.0,
-    "roll": 0.0, "pitch": 0.0, "yaw": 0.0
   },
   "min_range": 2,
   "max_range": 30,

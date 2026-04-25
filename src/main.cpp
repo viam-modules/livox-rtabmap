@@ -40,6 +40,9 @@
 #include <QWheelEvent>
 #include <QWidget>
 
+#include <opencv2/features2d.hpp>
+#include <opencv2/imgproc.hpp>
+
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/filters/voxel_grid.h>
@@ -658,9 +661,11 @@ int main(int argc, char *argv[]) {
         auto imu_to_lidar = viam_client->getImuToLidar();
         if (!imu_to_lidar.isNull())
             slam.setImuToLidar(imu_to_lidar);
-        auto lidar_in_frame = viam_client->getLidarInPlanningFrame();
-        if (!lidar_in_frame.isNull())
-            slam.setInitialPose(lidar_in_frame);
+        // planning_frame is the base link — its result is the lidar→base
+        // extrinsic, not a world-space initial pose.
+        auto lidar_to_base = viam_client->getLidarInPlanningFrame();
+        if (!lidar_to_base.isNull())
+            slam.setLidarToBase(lidar_to_base);
 #endif
     };
 
@@ -1169,6 +1174,27 @@ int main(int argc, char *argv[]) {
     });
     grid_timer.start(2000);  // 0.5 Hz — assembly is graph-wide
 
+    // Camera feed window — Qt-native QLabel, avoids cv::imshow/waitKey Qt conflict.
+    // Only shown when an RGB camera is configured in viam mode.
+    bool show_cam_window = (data_source == "viam" &&
+                            config.contains("viam") &&
+                            !config.at("viam").value("rgb_name", std::string{}).empty());
+    std::unique_ptr<QWidget> cam_win_storage;
+    QLabel *cam_label = nullptr;
+    if (show_cam_window) {
+        cam_win_storage = std::make_unique<QWidget>();
+        cam_win_storage->setWindowTitle("Camera Feed");
+        auto *vb = new QVBoxLayout(cam_win_storage.get());
+        vb->setContentsMargins(0, 0, 0, 0);
+        cam_label = new QLabel(cam_win_storage.get());
+        cam_label->setAlignment(Qt::AlignCenter);
+        cam_label->setMinimumSize(320, 240);
+        cam_label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        vb->addWidget(cam_label);
+        cam_win_storage->resize(640, 480);
+        cam_win_storage->show();
+    }
+
     QTimer update_timer;
     QObject::connect(&update_timer, &QTimer::timeout, [&]() {
         if (!running) { app.quit(); return; }
@@ -1361,6 +1387,36 @@ int main(int argc, char *argv[]) {
                                      QColor(255, 255, 0), /*foreground*/true);
             viewer.addOrUpdateLine("closure_link", latest_pose, closure_pose,
                                    QColor(255, 255, 0), /*arrow*/false, /*foreground*/true);
+        }
+
+        // Live camera feed with ORB keypoints — Qt-native, no cv::imshow
+        if (cam_label) {
+            cv::Mat rgb = slam.getLatestRGB();
+            std::cerr << "[CAM] frame: empty=" << rgb.empty()
+                      << " channels=" << (rgb.empty() ? 0 : rgb.channels())
+                      << " size=" << rgb.cols << "x" << rgb.rows
+                      << " type=" << rgb.type() << "\n";
+            if (!rgb.empty() && rgb.channels() == 3) {
+                static auto orb = cv::ORB::create(500);
+                std::vector<cv::KeyPoint> kps;
+                orb->detect(rgb, kps);
+                std::cerr << "[CAM] keypoints=" << kps.size() << "\n";
+                cv::Mat vis;
+                cv::drawKeypoints(rgb, kps, vis, cv::Scalar(0, 255, 0),
+                                  cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS);
+                cv::Mat vis_rgb;
+                cv::cvtColor(vis, vis_rgb, cv::COLOR_BGR2RGB);
+                std::cerr << "[CAM] vis_rgb: empty=" << vis_rgb.empty()
+                          << " size=" << vis_rgb.cols << "x" << vis_rgb.rows << "\n";
+                if (!vis_rgb.empty()) {
+                    QImage qimg(vis_rgb.data, vis_rgb.cols, vis_rgb.rows,
+                                (int)vis_rgb.step, QImage::Format_RGB888);
+                    cam_label->setPixmap(QPixmap::fromImage(qimg.copy())
+                        .scaled(cam_label->size(), Qt::KeepAspectRatio,
+                                Qt::SmoothTransformation));
+                    std::cerr << "[CAM] pixmap set ok\n";
+                }
+            }
         }
 
         viewer.refreshView();
