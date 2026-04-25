@@ -4,7 +4,9 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <glob.h>
 #include <iostream>
+#include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
 
@@ -12,10 +14,15 @@
 
 #include <opencv2/imgcodecs.hpp>
 
+#include <grpcpp/create_channel.h>
+#include <grpcpp/security/credentials.h>
+#include <grpcpp/support/channel_arguments.h>
+
 #include <viam/sdk/components/base.hpp>
 #include <viam/sdk/components/camera.hpp>
 #include <viam/sdk/components/movement_sensor.hpp>
 #include <viam/sdk/robot/client.hpp>
+#include <viam/sdk/rpc/dial.hpp>
 
 using namespace viam::sdk;
 
@@ -35,17 +42,46 @@ static rtabmap::Transform poseToTransform(const pose &p) {
 
 // Helper: open a fresh connection using the client's config.
 static std::shared_ptr<RobotClient> connect(const ViamClient::Config &cfg) {
-    ViamChannel::Options channel_opts;
     if (cfg.insecure) {
         std::cerr << "[VIAM] connecting: address=" << cfg.address << " (insecure/local)\n";
-        channel_opts.set_allow_insecure_downgrade(true);
-    } else {
-        std::cerr << "[VIAM] connecting: address=" << cfg.address
-                  << " key_id=" << (cfg.api_key_id.empty() ? "(empty)" : cfg.api_key_id)
-                  << " key=" << (cfg.api_key.empty() ? "(empty)" : "(set)") << "\n";
-        channel_opts.set_entity(cfg.api_key_id);
-        channel_opts.set_credentials(Credentials("api-key", cfg.api_key));
+
+        // viam-server exposes an unauthenticated plain-gRPC module socket.
+        // Discover it by globbing for the most recently created parent.sock.
+        std::string sock_path;
+        glob_t g;
+        if (glob("/tmp/viam-module-*/parent.sock", 0, nullptr, &g) == 0) {
+            time_t newest = 0;
+            for (size_t i = 0; i < g.gl_pathc; i++) {
+                struct stat st;
+                if (stat(g.gl_pathv[i], &st) == 0 && st.st_mtime > newest) {
+                    newest = st.st_mtime;
+                    sock_path = g.gl_pathv[i];
+                }
+            }
+        }
+        globfree(&g);
+
+        if (!sock_path.empty()) {
+            std::cerr << "[VIAM] using module socket: " << sock_path << "\n";
+            return RobotClient::at_local_socket("unix:" + sock_path, Options(0, boost::none));
+        }
+
+        // Fallback: direct plain gRPC (works if viam-server is started with --no-tls)
+        std::cerr << "[VIAM] no module socket found, falling back to plain gRPC\n";
+        grpc::ChannelArguments args;
+        args.SetMaxSendMessageSize(1 << 25);
+        args.SetMaxReceiveMessageSize(1 << 25);
+        auto raw = grpc::CreateCustomChannel(
+            cfg.address, grpc::InsecureChannelCredentials(), args);
+        return RobotClient::with_channel(ViamChannel(raw), Options(0, boost::none));
     }
+
+    ViamChannel::Options channel_opts;
+    std::cerr << "[VIAM] connecting: address=" << cfg.address
+              << " key_id=" << (cfg.api_key_id.empty() ? "(empty)" : cfg.api_key_id)
+              << " key=" << (cfg.api_key.empty() ? "(empty)" : "(set)") << "\n";
+    channel_opts.set_entity(cfg.api_key_id);
+    channel_opts.set_credentials(Credentials("api-key", cfg.api_key));
     Options options(0, std::move(channel_opts));
     return RobotClient::at_address(cfg.address, options);
 }
