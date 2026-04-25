@@ -36,11 +36,16 @@ static rtabmap::Transform poseToTransform(const pose &p) {
 // Helper: open a fresh connection using the client's config.
 static std::shared_ptr<RobotClient> connect(const ViamClient::Config &cfg) {
     ViamChannel::Options channel_opts;
-    std::cerr << "[VIAM] connecting: address=" << cfg.address
-              << " key_id=" << (cfg.api_key_id.empty() ? "(empty)" : cfg.api_key_id)
-              << " key=" << (cfg.api_key.empty() ? "(empty)" : "(set)") << "\n";
-    channel_opts.set_entity(cfg.api_key_id);
-    channel_opts.set_credentials(Credentials("api-key", cfg.api_key));
+    if (cfg.insecure) {
+        std::cerr << "[VIAM] connecting: address=" << cfg.address << " (insecure/local)\n";
+        channel_opts.set_allow_insecure_downgrade(true);
+    } else {
+        std::cerr << "[VIAM] connecting: address=" << cfg.address
+                  << " key_id=" << (cfg.api_key_id.empty() ? "(empty)" : cfg.api_key_id)
+                  << " key=" << (cfg.api_key.empty() ? "(empty)" : "(set)") << "\n";
+        channel_opts.set_entity(cfg.api_key_id);
+        channel_opts.set_credentials(Credentials("api-key", cfg.api_key));
+    }
     Options options(0, std::move(channel_opts));
     return RobotClient::at_address(cfg.address, options);
 }

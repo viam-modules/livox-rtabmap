@@ -600,6 +600,7 @@ int main(int argc, char *argv[]) {
 
         ViamClient::Config vcfg;
         vcfg.address     = vc.value("address", "");
+        vcfg.insecure    = vc.value("insecure", false);
         vcfg.api_key     = from_env("VIAM_API_KEY",    vc.value("api_key", ""));
         vcfg.api_key_id  = from_env("VIAM_API_KEY_ID", vc.value("api_key_id", ""));
         vcfg.lidar_name  = vc.value("lidar_name", "");

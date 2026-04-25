@@ -1,7 +1,8 @@
 {
   "data_source": "viam",
   "viam": {
-    "address":    "mugger-main.q0s2f7mco8.viam.cloud",
+    "address":    "localhost:8080",
+    "insecure": true,  
     "lidar_name":     "livox-pc",
     "imu_name":       "imu",
     "base_name":      "base-geometry-wrapper",

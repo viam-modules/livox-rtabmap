@@ -39,9 +39,10 @@ using RGBDCallback = std::function<void(const RGBDFrame &)>;
 class ViamClient {
 public:
     struct Config {
-        std::string address;      // e.g. "my-robot.abc123.viam.cloud"
+        std::string address;      // e.g. "my-robot.abc123.viam.cloud" or "localhost:8080"
         std::string api_key;      // fallback if VIAM_API_KEY not set
         std::string api_key_id;   // fallback if VIAM_API_KEY_ID not set
+        bool insecure = false;    // true = no credentials, allow plaintext (local connections)
         std::string lidar_name;   // Camera component name for pointcloud
         std::string imu_name;     // MovementSensor component name ("" = disabled)
         std::string base_name;    // Base component name ("" = no base control)
