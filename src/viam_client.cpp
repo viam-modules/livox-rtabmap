@@ -169,33 +169,13 @@ void ViamClient::cloudLoop() {
             }
         }
 
+        pcl::PointCloud<pcl::PointXYZI>::Ptr cloud;
+        auto t_fetch = std::chrono::steady_clock::now();
+        auto t_parse = t_fetch;
         try {
-            auto t_fetch = std::chrono::steady_clock::now();
             auto result = cam->get_point_cloud("pointcloud/pcd");
-            auto t_parse = std::chrono::steady_clock::now();
-
-            uint64_t ts_ns = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::system_clock::now().time_since_epoch())
-                .count());
-            auto cloud = parsePCD(result.pc);
-            auto t_cb = std::chrono::steady_clock::now();
-
-            // Skip clouds that are too small to produce valid ICP correspondences.
-            // A fresh connection or a corrupted PCD can return a handful of points
-            // which causes ICP to fail, resetting the odometry and spiralling.
-            constexpr size_t kMinPoints = 1000;
-            if (cloud && cloud->size() >= kMinPoints) frame_cb_(cloud, ts_ns);
-            auto t_done = std::chrono::steady_clock::now();
-
-            auto ms = [](auto a, auto b) {
-                return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
-            };
-            std::cerr << "[VIAM] fetch=" << ms(t_fetch, t_parse)
-                      << "ms  parse=" << ms(t_parse, t_cb)
-                      << "ms  slam=" << ms(t_cb, t_done)
-                      << "ms  total=" << ms(t_fetch, t_done) << "ms"
-                      << "  pts=" << (cloud ? cloud->size() : 0) << "\n";
+            t_parse = std::chrono::steady_clock::now();
+            cloud = parsePCD(result.pc);
         } catch (const std::exception &e) {
             std::cerr << "[VIAM] cloud fetch error: " << e.what() << "\n";
             auto since = std::chrono::duration_cast<std::chrono::seconds>(
@@ -208,7 +188,37 @@ void ViamClient::cloudLoop() {
                 std::cerr << "[VIAM] reconnect cooldown (" << since << "s < "
                           << kReconnectCooldownSec << "s), skipping reconnect\n";
             }
+            std::this_thread::sleep_until(t0 + interval);
+            continue;
         }
+
+        auto t_cb = std::chrono::steady_clock::now();
+        uint64_t ts_ns = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+
+        // Skip clouds too small to produce valid ICP correspondences —
+        // a corrupted or truncated PCD after reconnect can spiral into an
+        // odometry reset loop.
+        constexpr size_t kMinPoints = 1000;
+        if (cloud && cloud->size() >= kMinPoints) {
+            try {
+                frame_cb_(cloud, ts_ns);
+            } catch (const std::exception &e) {
+                std::cerr << "[VIAM] SLAM error in frame callback: " << e.what() << "\n";
+                // SLAM errors are not network errors — don't reconnect.
+            }
+        }
+        auto t_done = std::chrono::steady_clock::now();
+
+        auto ms = [](auto a, auto b) {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+        };
+        std::cerr << "[VIAM] fetch=" << ms(t_fetch, t_parse)
+                  << "ms  parse=" << ms(t_parse, t_cb)
+                  << "ms  slam=" << ms(t_cb, t_done)
+                  << "ms  total=" << ms(t_fetch, t_done) << "ms"
+                  << "  pts=" << (cloud ? cloud->size() : 0) << "\n";
 
         std::this_thread::sleep_until(t0 + interval);
     }

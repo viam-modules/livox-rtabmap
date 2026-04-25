@@ -411,7 +411,10 @@ bool SlamPipeline::processCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud, uint
             std::cerr << "\n";
             if (odom_fail_count_ >= odom_fail_reset_threshold_) {
                 std::cerr << "[SLAM] Resetting odometry after " << odom_fail_count_ << " failures\n";
-                odom_->reset(initial_pose_.isNull() ? rtabmap::Transform() : initial_pose_);
+                rtabmap::Transform reset_pose = !current_pose_.isNull() ? current_pose_
+                                               : !initial_pose_.isNull() ? initial_pose_
+                                               : rtabmap::Transform::getIdentity();
+                odom_->reset(reset_pose);
                 odom_fail_count_ = 0;
             }
             return false;
